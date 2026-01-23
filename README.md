@@ -420,8 +420,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 📞 Contact
 
 - **Project**: Hamo AI Therapy Platform
-- **Email**: your-email@example.com
-- **GitHub**: https://github.com/YOUR_USERNAME/hamo-ume
+- **Email**: chris@hamo.ai
+- **GitHub**: https://github.com/chrischengzh/hamo-ume
 
 ---
 
