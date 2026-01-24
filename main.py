@@ -1,23 +1,48 @@
 """
 Hamo-UME: Hamo Unified Mind Engine
-Backend API Server for Hamo Pro and Hamo Client
+Backend API Server with JWT Authentication
 
-Tech Stack: Python + FastAPI
-Version: 0.1.0 (Prototype)
+Tech Stack: Python + FastAPI + JWT
+Version: 0.2.0
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel, Field, EmailStr
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 import random
 import uuid
+import os
+
+# JWT dependencies
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+# JWT Settings - In production, use environment variables!
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", "hamo-ume-secret-key-change-in-production-2026")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
+
+# Password hashing
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# Security
+security = HTTPBearer()
 
 # ============================================================
 # ENUMS
 # ============================================================
+
+class UserRole(str, Enum):
+    THERAPIST = "therapist"
+    CLIENT = "client"
 
 class EmotionType(str, Enum):
     ANXIETY = "anxiety"
@@ -45,13 +70,67 @@ class RelationshipStyle(str, Enum):
     DISORGANIZED = "disorganized"
 
 # ============================================================
-# DATA MODELS - User AI Mind
+# USER MODELS
+# ============================================================
+
+class UserBase(BaseModel):
+    email: EmailStr
+    full_name: str
+
+class TherapistCreate(UserBase):
+    password: str
+    profession: str
+    license_number: Optional[str] = None
+    specializations: list[str] = Field(default_factory=list)
+
+class ClientCreate(UserBase):
+    password: str
+    therapist_id: Optional[str] = None  # Linked therapist
+    invitation_code: Optional[str] = None
+
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str
+
+class UserInDB(UserBase):
+    id: str
+    role: UserRole
+    hashed_password: str
+    created_at: datetime = Field(default_factory=datetime.now)
+    is_active: bool = True
+    # Therapist specific
+    profession: Optional[str] = None
+    license_number: Optional[str] = None
+    specializations: list[str] = Field(default_factory=list)
+    # Client specific
+    therapist_id: Optional[str] = None
+
+class UserResponse(UserBase):
+    id: str
+    role: UserRole
+    created_at: datetime
+    is_active: bool
+    profession: Optional[str] = None
+    specializations: list[str] = Field(default_factory=list)
+    therapist_id: Optional[str] = None
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserResponse
+
+class TokenData(BaseModel):
+    user_id: str
+    email: str
+    role: UserRole
+
+# ============================================================
+# AI MIND MODELS (from previous version)
 # ============================================================
 
 class PersonalityCharacteristics(BaseModel):
-    """User's personality profile"""
     primary_traits: list[PersonalityTrait] = Field(default_factory=list)
-    openness: float = Field(ge=0, le=1, description="0-1 scale")
+    openness: float = Field(ge=0, le=1)
     conscientiousness: float = Field(ge=0, le=1)
     extraversion: float = Field(ge=0, le=1)
     agreeableness: float = Field(ge=0, le=1)
@@ -59,7 +138,6 @@ class PersonalityCharacteristics(BaseModel):
     description: str = ""
 
 class EmotionPattern(BaseModel):
-    """User's emotional patterns and triggers"""
     dominant_emotions: list[EmotionType] = Field(default_factory=list)
     triggers: list[str] = Field(default_factory=list)
     coping_mechanisms: list[str] = Field(default_factory=list)
@@ -67,7 +145,6 @@ class EmotionPattern(BaseModel):
     description: str = ""
 
 class CognitionBeliefs(BaseModel):
-    """User's cognitive patterns and core beliefs"""
     core_beliefs: list[str] = Field(default_factory=list)
     cognitive_distortions: list[str] = Field(default_factory=list)
     thinking_patterns: list[str] = Field(default_factory=list)
@@ -76,7 +153,6 @@ class CognitionBeliefs(BaseModel):
     future_perception: str = ""
 
 class RelationshipManipulations(BaseModel):
-    """User's relationship patterns and attachment style"""
     attachment_style: RelationshipStyle = RelationshipStyle.SECURE
     relationship_patterns: list[str] = Field(default_factory=list)
     communication_style: str = ""
@@ -85,7 +161,6 @@ class RelationshipManipulations(BaseModel):
     intimacy_comfort: float = Field(ge=0, le=1)
 
 class UserAIMind(BaseModel):
-    """Complete User AI Mind Profile"""
     user_id: str
     avatar_id: str
     personality: PersonalityCharacteristics
@@ -93,20 +168,18 @@ class UserAIMind(BaseModel):
     cognition_beliefs: CognitionBeliefs
     relationship_manipulations: RelationshipManipulations
     last_updated: datetime = Field(default_factory=datetime.now)
-    confidence_score: float = Field(ge=0, le=1, description="Model confidence")
+    confidence_score: float = Field(ge=0, le=1)
 
 # ============================================================
-# DATA MODELS - API Requests/Responses
+# REQUEST/RESPONSE MODELS
 # ============================================================
 
 class ConversationMessage(BaseModel):
-    """Single message in a conversation"""
-    sender: str  # "client" or "avatar"
+    sender: str
     content: str
     timestamp: datetime = Field(default_factory=datetime.now)
 
 class TrainingRequest(BaseModel):
-    """Request to train AI Mind with conversation data"""
     user_id: str
     avatar_id: str
     session_id: str
@@ -114,50 +187,101 @@ class TrainingRequest(BaseModel):
     session_notes: Optional[str] = None
 
 class TrainingResponse(BaseModel):
-    """Response after training request"""
     success: bool
     message: str
     training_id: str
     estimated_completion: datetime
 
 class SessionFeedback(BaseModel):
-    """Client's session feedback - Being, Feeling, Knowing"""
     user_id: str
     session_id: str
-    # Being - physical/somatic state
     being_energy_level: float = Field(ge=0, le=10)
     being_physical_comfort: float = Field(ge=0, le=10)
     being_description: Optional[str] = None
-    # Feeling - emotional state
     feeling_primary_emotion: EmotionType
     feeling_intensity: float = Field(ge=0, le=10)
     feeling_description: Optional[str] = None
-    # Knowing - cognitive/insight state
     knowing_clarity: float = Field(ge=0, le=10)
     knowing_insights: list[str] = Field(default_factory=list)
     knowing_description: Optional[str] = None
-    # Overall
     overall_rating: float = Field(ge=0, le=10)
     timestamp: datetime = Field(default_factory=datetime.now)
 
 class FeedbackResponse(BaseModel):
-    """Response after feedback submission"""
     success: bool
     message: str
     feedback_id: str
+
+# ============================================================
+# IN-MEMORY STORAGE (Replace with database in production)
+# ============================================================
+
+users_db: dict[str, UserInDB] = {}
+mind_cache: dict[str, UserAIMind] = {}
+feedback_storage: list[SessionFeedback] = []
+training_queue: list[TrainingRequest] = []
+invitation_codes: dict[str, str] = {}  # code -> therapist_id
+
+# ============================================================
+# AUTH UTILITIES
+# ============================================================
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(plain_password, hashed_password)
+
+def get_password_hash(password: str) -> str:
+    return pwd_context.hash(password)
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+def decode_token(token: str) -> TokenData:
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id: str = payload.get("sub")
+        email: str = payload.get("email")
+        role: str = payload.get("role")
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        return TokenData(user_id=user_id, email=email, role=UserRole(role))
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> UserInDB:
+    token = credentials.credentials
+    token_data = decode_token(token)
+    user = users_db.get(token_data.user_id)
+    if user is None:
+        raise HTTPException(status_code=401, detail="User not found")
+    if not user.is_active:
+        raise HTTPException(status_code=401, detail="User is inactive")
+    return user
+
+async def get_current_therapist(current_user: UserInDB = Depends(get_current_user)) -> UserInDB:
+    if current_user.role != UserRole.THERAPIST:
+        raise HTTPException(status_code=403, detail="Therapist access required")
+    return current_user
+
+async def get_current_client(current_user: UserInDB = Depends(get_current_user)) -> UserInDB:
+    if current_user.role != UserRole.CLIENT:
+        raise HTTPException(status_code=403, detail="Client access required")
+    return current_user
+
+def generate_invitation_code(therapist_id: str) -> str:
+    code = str(uuid.uuid4())[:8].upper()
+    invitation_codes[code] = therapist_id
+    return code
 
 # ============================================================
 # MOCK DATA GENERATOR
 # ============================================================
 
 class MockDataGenerator:
-    """Generates realistic mock data for prototyping"""
-    
     @staticmethod
     def generate_user_ai_mind(user_id: str, avatar_id: str) -> UserAIMind:
-        """Generate a simulated User AI Mind profile"""
-        
-        # Simulated personality
         personality = PersonalityCharacteristics(
             primary_traits=random.sample(list(PersonalityTrait), k=random.randint(2, 4)),
             openness=round(random.uniform(0.3, 0.9), 2),
@@ -165,75 +289,36 @@ class MockDataGenerator:
             extraversion=round(random.uniform(0.2, 0.8), 2),
             agreeableness=round(random.uniform(0.4, 0.9), 2),
             neuroticism=round(random.uniform(0.3, 0.7), 2),
-            description="Client shows introverted tendencies with high conscientiousness. "
-                       "Tends toward perfectionism in work-related tasks."
+            description="Client shows introverted tendencies with high conscientiousness."
         )
-        
-        # Simulated emotion patterns
         emotion_pattern = EmotionPattern(
-            dominant_emotions=random.sample([EmotionType.ANXIETY, EmotionType.SADNESS, 
-                                            EmotionType.NEUTRAL], k=2),
-            triggers=[
-                "Work deadlines and performance pressure",
-                "Social situations with unfamiliar people",
-                "Conflict or perceived criticism"
-            ],
-            coping_mechanisms=[
-                "Withdrawal and isolation",
-                "Over-preparation and planning",
-                "Seeking reassurance from trusted others"
-            ],
+            dominant_emotions=random.sample([EmotionType.ANXIETY, EmotionType.SADNESS, EmotionType.NEUTRAL], k=2),
+            triggers=["Work deadlines", "Social situations", "Conflict or criticism"],
+            coping_mechanisms=["Withdrawal", "Over-preparation", "Seeking reassurance"],
             emotional_stability=round(random.uniform(0.4, 0.7), 2),
-            description="Experiences heightened anxiety in performance situations. "
-                       "Emotional responses tend toward internalization."
+            description="Experiences heightened anxiety in performance situations."
         )
-        
-        # Simulated cognition beliefs
         cognition_beliefs = CognitionBeliefs(
-            core_beliefs=[
-                "I must perform perfectly to be accepted",
-                "Making mistakes means I am a failure",
-                "Others' needs are more important than mine"
-            ],
-            cognitive_distortions=[
-                "All-or-nothing thinking",
-                "Catastrophizing",
-                "Mind reading"
-            ],
-            thinking_patterns=[
-                "Rumination on past events",
-                "Anticipatory worry about future scenarios",
-                "Self-critical internal dialogue"
-            ],
+            core_beliefs=["I must perform perfectly to be accepted", "Making mistakes means failure"],
+            cognitive_distortions=["All-or-nothing thinking", "Catastrophizing", "Mind reading"],
+            thinking_patterns=["Rumination", "Anticipatory worry", "Self-critical dialogue"],
             self_perception="Views self as capable but fundamentally flawed",
             world_perception="World is demanding and judgmental",
             future_perception="Future success depends on perfect performance"
         )
-        
-        # Simulated relationship patterns
         relationship_manipulations = RelationshipManipulations(
-            attachment_style=random.choice([RelationshipStyle.ANXIOUS, 
-                                           RelationshipStyle.AVOIDANT]),
-            relationship_patterns=[
-                "Difficulty expressing needs directly",
-                "Fear of abandonment in close relationships",
-                "Tendency to over-accommodate others"
-            ],
-            communication_style="Indirect, tends to hint rather than state needs explicitly",
-            conflict_resolution="Avoidant - prefers to minimize or ignore conflicts",
+            attachment_style=random.choice([RelationshipStyle.ANXIOUS, RelationshipStyle.AVOIDANT]),
+            relationship_patterns=["Difficulty expressing needs", "Fear of abandonment"],
+            communication_style="Indirect, tends to hint rather than state needs",
+            conflict_resolution="Avoidant - prefers to minimize conflicts",
             trust_level=round(random.uniform(0.4, 0.7), 2),
             intimacy_comfort=round(random.uniform(0.3, 0.6), 2)
         )
-        
         return UserAIMind(
-            user_id=user_id,
-            avatar_id=avatar_id,
-            personality=personality,
-            emotion_pattern=emotion_pattern,
-            cognition_beliefs=cognition_beliefs,
-            relationship_manipulations=relationship_manipulations,
-            last_updated=datetime.now(),
-            confidence_score=round(random.uniform(0.7, 0.95), 2)
+            user_id=user_id, avatar_id=avatar_id,
+            personality=personality, emotion_pattern=emotion_pattern,
+            cognition_beliefs=cognition_beliefs, relationship_manipulations=relationship_manipulations,
+            last_updated=datetime.now(), confidence_score=round(random.uniform(0.7, 0.95), 2)
         )
 
 # ============================================================
@@ -242,129 +327,176 @@ class MockDataGenerator:
 
 app = FastAPI(
     title="Hamo-UME API",
-    description="Hamo Unified Mind Engine - Backend API for AI Therapy Platform",
-    version="0.1.0"
+    description="Hamo Unified Mind Engine - Backend API with JWT Authentication",
+    version="0.2.0"
 )
 
-# CORS middleware for frontend integration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# In-memory storage for prototype
-mind_cache: dict[str, UserAIMind] = {}
-feedback_storage: list[SessionFeedback] = []
-training_queue: list[TrainingRequest] = []
-
 # ============================================================
-# API ENDPOINTS
+# AUTH ENDPOINTS
 # ============================================================
 
-@app.get("/")
+@app.post("/api/v1/auth/register/therapist", response_model=Token, tags=["Authentication"])
+async def register_therapist(user_data: TherapistCreate):
+    """Register a new therapist account"""
+    # Check if email exists
+    for u in users_db.values():
+        if u.email == user_data.email:
+            raise HTTPException(status_code=400, detail="Email already registered")
+    
+    user_id = str(uuid.uuid4())
+    hashed_password = get_password_hash(user_data.password)
+    
+    new_user = UserInDB(
+        id=user_id,
+        email=user_data.email,
+        full_name=user_data.full_name,
+        role=UserRole.THERAPIST,
+        hashed_password=hashed_password,
+        profession=user_data.profession,
+        license_number=user_data.license_number,
+        specializations=user_data.specializations
+    )
+    users_db[user_id] = new_user
+    
+    access_token = create_access_token(
+        data={"sub": user_id, "email": user_data.email, "role": UserRole.THERAPIST}
+    )
+    
+    return Token(
+        access_token=access_token,
+        user=UserResponse(**new_user.model_dump())
+    )
+
+@app.post("/api/v1/auth/register/client", response_model=Token, tags=["Authentication"])
+async def register_client(user_data: ClientCreate):
+    """Register a new client account (requires invitation code)"""
+    # Check if email exists
+    for u in users_db.values():
+        if u.email == user_data.email:
+            raise HTTPException(status_code=400, detail="Email already registered")
+    
+    # Validate invitation code if provided
+    therapist_id = None
+    if user_data.invitation_code:
+        therapist_id = invitation_codes.get(user_data.invitation_code)
+        if not therapist_id:
+            raise HTTPException(status_code=400, detail="Invalid invitation code")
+    
+    user_id = str(uuid.uuid4())
+    hashed_password = get_password_hash(user_data.password)
+    
+    new_user = UserInDB(
+        id=user_id,
+        email=user_data.email,
+        full_name=user_data.full_name,
+        role=UserRole.CLIENT,
+        hashed_password=hashed_password,
+        therapist_id=therapist_id or user_data.therapist_id
+    )
+    users_db[user_id] = new_user
+    
+    access_token = create_access_token(
+        data={"sub": user_id, "email": user_data.email, "role": UserRole.CLIENT}
+    )
+    
+    return Token(
+        access_token=access_token,
+        user=UserResponse(**new_user.model_dump())
+    )
+
+@app.post("/api/v1/auth/login", response_model=Token, tags=["Authentication"])
+async def login(credentials: UserLogin):
+    """Login with email and password"""
+    user = None
+    for u in users_db.values():
+        if u.email == credentials.email:
+            user = u
+            break
+    
+    if not user or not verify_password(credentials.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    
+    if not user.is_active:
+        raise HTTPException(status_code=401, detail="Account is inactive")
+    
+    access_token = create_access_token(
+        data={"sub": user.id, "email": user.email, "role": user.role}
+    )
+    
+    return Token(
+        access_token=access_token,
+        user=UserResponse(**user.model_dump())
+    )
+
+@app.get("/api/v1/auth/me", response_model=UserResponse, tags=["Authentication"])
+async def get_current_user_info(current_user: UserInDB = Depends(get_current_user)):
+    """Get current authenticated user info"""
+    return UserResponse(**current_user.model_dump())
+
+@app.post("/api/v1/auth/invitation-code", tags=["Authentication"])
+async def create_invitation_code(current_user: UserInDB = Depends(get_current_therapist)):
+    """Generate an invitation code for clients (therapist only)"""
+    code = generate_invitation_code(current_user.id)
+    return {"invitation_code": code, "therapist_id": current_user.id}
+
+# ============================================================
+# PROTECTED API ENDPOINTS
+# ============================================================
+
+@app.get("/", tags=["Health"])
 async def root():
-    """API Health Check"""
-    return {
-        "service": "Hamo-UME",
-        "version": "0.1.0",
-        "status": "running",
-        "description": "Hamo Unified Mind Engine API"
-    }
+    return {"service": "Hamo-UME", "version": "0.2.0", "status": "running", "auth": "JWT enabled"}
 
-@app.get("/api/v1/mind/{user_id}/{avatar_id}", response_model=UserAIMind)
-async def get_user_ai_mind(user_id: str, avatar_id: str):
-    """
-    getUserAIMind() - Get User's AI Mind Profile
-    
-    Returns the up-to-date AI Mind for a specific User + Pro Avatar pair,
-    including Personality, Emotion Pattern, Cognition Beliefs, 
-    and Relationship Manipulations.
-    
-    Usage: Combine with Pro Avatar profile and conversation history
-    to create context prompt for LLM therapy responses.
-    """
+@app.get("/api/v1/mind/{user_id}/{avatar_id}", response_model=UserAIMind, tags=["AI Mind"])
+async def get_user_ai_mind(user_id: str, avatar_id: str, current_user: UserInDB = Depends(get_current_user)):
+    """Get User's AI Mind Profile (requires authentication)"""
     cache_key = f"{user_id}_{avatar_id}"
-    
-    # Check cache first
     if cache_key in mind_cache:
         return mind_cache[cache_key]
-    
-    # Generate new mock data for prototype
     user_mind = MockDataGenerator.generate_user_ai_mind(user_id, avatar_id)
     mind_cache[cache_key] = user_mind
-    
     return user_mind
 
-@app.post("/api/v1/mind/train", response_model=TrainingResponse)
-async def submit_training_request(request: TrainingRequest):
-    """
-    submitTrainingRequest() - Submit conversation for AI Mind training
-    
-    Accepts conversation data between Pro Avatar and Client User
-    to update and refine the User's AI Mind model.
-    """
+@app.post("/api/v1/mind/train", response_model=TrainingResponse, tags=["AI Mind"])
+async def submit_training_request(request: TrainingRequest, current_user: UserInDB = Depends(get_current_therapist)):
+    """Submit conversation for AI Mind training (therapist only)"""
     if not request.conversation:
         raise HTTPException(status_code=400, detail="Conversation cannot be empty")
-    
-    # Store in training queue (prototype simulation)
     training_queue.append(request)
     training_id = str(uuid.uuid4())
-    
-    # Simulate training process
     return TrainingResponse(
         success=True,
-        message=f"Training request queued successfully. "
-                f"Processing {len(request.conversation)} messages.",
+        message=f"Training request queued. Processing {len(request.conversation)} messages.",
         training_id=training_id,
         estimated_completion=datetime.now()
     )
 
-@app.post("/api/v1/feedback/session", response_model=FeedbackResponse)
-async def submit_session_feedback(feedback: SessionFeedback):
-    """
-    submitSessionFeedback() - Submit client's session feedback
-    
-    Accepts feedback on Being (physical), Feeling (emotional), 
-    and Knowing (cognitive/insight) states after a session.
-    """
-    # Store feedback (prototype simulation)
+@app.post("/api/v1/feedback/session", response_model=FeedbackResponse, tags=["Feedback"])
+async def submit_session_feedback(feedback: SessionFeedback, current_user: UserInDB = Depends(get_current_client)):
+    """Submit session feedback (client only)"""
     feedback_storage.append(feedback)
     feedback_id = str(uuid.uuid4())
-    
-    return FeedbackResponse(
-        success=True,
-        message="Session feedback recorded successfully",
-        feedback_id=feedback_id
-    )
+    return FeedbackResponse(success=True, message="Feedback recorded", feedback_id=feedback_id)
 
-@app.get("/api/v1/feedback/{user_id}", response_model=list[SessionFeedback])
-async def get_user_feedback_history(user_id: str):
-    """Get all feedback history for a specific user"""
-    user_feedback = [f for f in feedback_storage if f.user_id == user_id]
-    return user_feedback
+@app.get("/api/v1/feedback/{user_id}", response_model=list[SessionFeedback], tags=["Feedback"])
+async def get_user_feedback_history(user_id: str, current_user: UserInDB = Depends(get_current_user)):
+    """Get feedback history for a user"""
+    return [f for f in feedback_storage if f.user_id == user_id]
 
-@app.get("/api/v1/training/status/{training_id}")
-async def get_training_status(training_id: str):
-    """Check status of a training request"""
-    # Prototype: Always return completed
-    return {
-        "training_id": training_id,
-        "status": "completed",
-        "progress": 100,
-        "message": "AI Mind model updated successfully"
-    }
+@app.get("/api/v1/therapist/clients", tags=["Therapist"])
+async def get_therapist_clients(current_user: UserInDB = Depends(get_current_therapist)):
+    """Get all clients linked to current therapist"""
+    clients = [UserResponse(**u.model_dump()) for u in users_db.values() 
+               if u.role == UserRole.CLIENT and u.therapist_id == current_user.id]
+    return {"clients": clients, "count": len(clients)}
 
-# ============================================================
-# RUN SERVER (for local development only)
-# ============================================================
-
-# Commented out for Vercel deployment
-# if __name__ == "__main__":
-#     import uvicorn
-#     uvicorn.run(app, host="0.0.0.0", port=8000)
-
-# For Vercel: export the app
+# For Vercel deployment
 app = app
