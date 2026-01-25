@@ -3,7 +3,7 @@ Hamo-UME: Hamo Unified Mind Engine
 Backend API Server with JWT Authentication
 
 Tech Stack: Python + FastAPI + JWT
-Version: 1.2.1
+Version: 1.2.2
 """
 
 from fastapi import FastAPI, HTTPException, Depends, status
@@ -76,24 +76,44 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     return hash_password(plain_password) == hashed_password
 
 # ============================================================
-# USER MODELS
+# AUTH MODELS - PRO (THERAPIST)
 # ============================================================
 
-class UserRegister(BaseModel):
+class ProRegister(BaseModel):
     email: EmailStr
     password: str
     full_name: str
-    role: UserRole
-    # Therapist fields (optional)
-    profession: Optional[str] = None
+    profession: str
     license_number: Optional[str] = None
     specializations: list[str] = Field(default_factory=list)
-    # Client fields (optional)
-    invitation_code: Optional[str] = None
 
-class UserLogin(BaseModel):
+class ProLogin(BaseModel):
     email: EmailStr
     password: str
+
+class ProRefreshRequest(BaseModel):
+    refresh_token: str
+
+# ============================================================
+# AUTH MODELS - CLIENT
+# ============================================================
+
+class ClientRegister(BaseModel):
+    email: EmailStr
+    password: str
+    full_name: str
+    invitation_code: str  # Required for client registration
+
+class ClientLogin(BaseModel):
+    email: EmailStr
+    password: str
+
+class ClientRefreshRequest(BaseModel):
+    refresh_token: str
+
+# ============================================================
+# USER MODELS
+# ============================================================
 
 class UserInDB(BaseModel):
     id: str
@@ -103,35 +123,50 @@ class UserInDB(BaseModel):
     hashed_password: str
     created_at: datetime = Field(default_factory=datetime.now)
     is_active: bool = True
-    # Therapist specific
+    # Pro (Therapist) specific
     profession: Optional[str] = None
     license_number: Optional[str] = None
     specializations: list[str] = Field(default_factory=list)
     # Client specific
     therapist_id: Optional[str] = None
     avatar_id: Optional[str] = None
+    client_profile_id: Optional[str] = None
 
-class UserResponse(BaseModel):
+class ProResponse(BaseModel):
     id: str
     email: str
     full_name: str
-    role: UserRole
+    role: UserRole = UserRole.THERAPIST
     created_at: datetime
     is_active: bool
     profession: Optional[str] = None
+    license_number: Optional[str] = None
     specializations: list[str] = Field(default_factory=list)
+
+class ClientResponse(BaseModel):
+    id: str
+    email: str
+    full_name: str
+    role: UserRole = UserRole.CLIENT
+    created_at: datetime
+    is_active: bool
     therapist_id: Optional[str] = None
     avatar_id: Optional[str] = None
+    client_profile_id: Optional[str] = None
 
-class TokenResponse(BaseModel):
+class ProTokenResponse(BaseModel):
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
     expires_in: int
-    user: UserResponse
+    user: ProResponse
 
-class RefreshTokenRequest(BaseModel):
+class ClientTokenResponse(BaseModel):
+    access_token: str
     refresh_token: str
+    token_type: str = "bearer"
+    expires_in: int
+    user: ClientResponse
 
 # ============================================================
 # AVATAR MODELS
@@ -160,10 +195,10 @@ class AvatarResponse(AvatarInDB):
     pass
 
 # ============================================================
-# CLIENT MODELS
+# CLIENT PROFILE MODELS
 # ============================================================
 
-class ClientCreate(BaseModel):
+class ClientProfileCreate(BaseModel):
     name: str
     avatar_id: str
     sex: Optional[str] = None
@@ -174,11 +209,11 @@ class ClientCreate(BaseModel):
     goals: Optional[str] = None
     therapy_principles: Optional[str] = None
 
-class ClientInDB(BaseModel):
+class ClientProfileInDB(BaseModel):
     id: str
     therapist_id: str
     avatar_id: str
-    user_id: Optional[str] = None  # Linked user account (if registered)
+    user_id: Optional[str] = None  # Linked user account
     name: str
     sex: Optional[str] = None
     age: Optional[int] = None
@@ -192,7 +227,7 @@ class ClientInDB(BaseModel):
     sessions: int = 0
     avg_time: int = 0
 
-class ClientResponse(ClientInDB):
+class ClientProfileResponse(ClientProfileInDB):
     avatar_name: Optional[str] = None
 
 # ============================================================
@@ -217,7 +252,7 @@ class InvitationResponse(BaseModel):
     client_id: str
     avatar_id: str
     expires_at: datetime
-    qr_data: str  # Data for QR code generation
+    qr_data: str
 
 # ============================================================
 # AI MIND MODELS
@@ -293,11 +328,12 @@ class FeedbackResponse(BaseModel):
 
 users_db: dict[str, UserInDB] = {}
 avatars_db: dict[str, AvatarInDB] = {}
-clients_db: dict[str, ClientInDB] = {}
+client_profiles_db: dict[str, ClientProfileInDB] = {}
 invitations_db: dict[str, InvitationInDB] = {}
 mind_cache: dict[str, UserAIMind] = {}
 feedback_storage: list[dict] = []
-refresh_tokens_db: dict[str, str] = {}  # refresh_token -> user_id
+pro_refresh_tokens_db: dict[str, str] = {}  # refresh_token -> user_id
+client_refresh_tokens_db: dict[str, str] = {}  # refresh_token -> user_id
 
 # ============================================================
 # JWT UTILITIES
@@ -309,12 +345,15 @@ def create_access_token(data: dict) -> str:
     to_encode.update({"exp": expire, "type": "access"})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
-def create_refresh_token(user_id: str) -> str:
-    to_encode = {"sub": user_id, "type": "refresh"}
+def create_refresh_token(user_id: str, role: UserRole) -> str:
+    to_encode = {"sub": user_id, "type": "refresh", "role": role}
     expire = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
     to_encode.update({"exp": expire})
     token = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    refresh_tokens_db[token] = user_id
+    if role == UserRole.THERAPIST:
+        pro_refresh_tokens_db[token] = user_id
+    else:
+        client_refresh_tokens_db[token] = user_id
     return token
 
 def decode_token(token: str) -> dict:
@@ -336,9 +375,9 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         raise HTTPException(status_code=401, detail="User inactive")
     return user
 
-async def get_current_therapist(current_user: UserInDB = Depends(get_current_user)) -> UserInDB:
+async def get_current_pro(current_user: UserInDB = Depends(get_current_user)) -> UserInDB:
     if current_user.role != UserRole.THERAPIST:
-        raise HTTPException(status_code=403, detail="Therapist access required")
+        raise HTTPException(status_code=403, detail="Pro (Therapist) access required")
     return current_user
 
 async def get_current_client(current_user: UserInDB = Depends(get_current_user)) -> UserInDB:
@@ -398,8 +437,8 @@ class MockDataGenerator:
 
 app = FastAPI(
     title="Hamo-UME API",
-    description="Hamo Unified Mind Engine - Backend API v1.2.1",
-    version="1.2.1"
+    description="Hamo Unified Mind Engine - Backend API v1.2.2",
+    version="1.2.2"
 )
 
 app.add_middleware(
@@ -416,145 +455,218 @@ app.add_middleware(
 
 @app.get("/", tags=["Health"])
 async def root():
-    return {
-        "service": "Hamo-UME",
-        "version": "1.2.1",
-        "status": "running"
-    }
+    return {"service": "Hamo-UME", "version": "1.2.2", "status": "running"}
 
 # ============================================================
-# AUTH ENDPOINTS
+# PRO (THERAPIST) AUTH ENDPOINTS
 # ============================================================
 
-@app.post("/api/auth/register", response_model=TokenResponse, tags=["Auth"])
-async def register(user_data: UserRegister):
-    """Register a new user (therapist or client)"""
-    # Check email exists
+@app.post("/api/auth/registerPro", response_model=ProTokenResponse, tags=["Auth - Pro"])
+async def register_pro(user_data: ProRegister):
+    """Register a new Pro (Therapist) account"""
     for u in users_db.values():
         if u.email == user_data.email:
             raise HTTPException(status_code=400, detail="Email already registered")
     
     user_id = str(uuid.uuid4())
-    therapist_id = None
-    avatar_id = None
-    
-    # Validate invitation code for clients
-    if user_data.role == UserRole.CLIENT:
-        if not user_data.invitation_code:
-            raise HTTPException(status_code=400, detail="Invitation code required for client registration")
-        invitation = invitations_db.get(user_data.invitation_code)
-        if not invitation:
-            raise HTTPException(status_code=400, detail="Invalid invitation code")
-        if invitation.is_used:
-            raise HTTPException(status_code=400, detail="Invitation code already used")
-        if invitation.expires_at < datetime.now():
-            raise HTTPException(status_code=400, detail="Invitation code expired")
-        therapist_id = invitation.therapist_id
-        avatar_id = invitation.avatar_id
-        # Mark invitation as used
-        invitation.is_used = True
-        # Link user to client record
-        client = clients_db.get(invitation.client_id)
-        if client:
-            client.user_id = user_id
-    
     new_user = UserInDB(
         id=user_id,
         email=user_data.email,
         full_name=user_data.full_name,
-        role=user_data.role,
+        role=UserRole.THERAPIST,
         hashed_password=hash_password(user_data.password),
         profession=user_data.profession,
         license_number=user_data.license_number,
-        specializations=user_data.specializations,
-        therapist_id=therapist_id,
-        avatar_id=avatar_id
+        specializations=user_data.specializations
     )
     users_db[user_id] = new_user
     
-    access_token = create_access_token({"sub": user_id, "email": user_data.email, "role": user_data.role})
-    refresh_token = create_refresh_token(user_id)
+    access_token = create_access_token({"sub": user_id, "email": user_data.email, "role": UserRole.THERAPIST})
+    refresh_token = create_refresh_token(user_id, UserRole.THERAPIST)
     
-    return TokenResponse(
+    return ProTokenResponse(
         access_token=access_token,
         refresh_token=refresh_token,
         expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-        user=UserResponse(**new_user.model_dump())
+        user=ProResponse(**new_user.model_dump())
     )
 
-@app.post("/api/auth/login", response_model=TokenResponse, tags=["Auth"])
-async def login(credentials: UserLogin):
-    """Login with email and password"""
+@app.post("/api/auth/loginPro", response_model=ProTokenResponse, tags=["Auth - Pro"])
+async def login_pro(credentials: ProLogin):
+    """Login as Pro (Therapist)"""
     user = None
     for u in users_db.values():
-        if u.email == credentials.email:
+        if u.email == credentials.email and u.role == UserRole.THERAPIST:
             user = u
             break
     
     if not user or not verify_password(credentials.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid email or password")
-    
     if not user.is_active:
         raise HTTPException(status_code=401, detail="Account inactive")
     
-    access_token = create_access_token({"sub": user.id, "email": user.email, "role": user.role})
-    refresh_token = create_refresh_token(user.id)
+    access_token = create_access_token({"sub": user.id, "email": user.email, "role": UserRole.THERAPIST})
+    refresh_token = create_refresh_token(user.id, UserRole.THERAPIST)
     
-    return TokenResponse(
+    return ProTokenResponse(
         access_token=access_token,
         refresh_token=refresh_token,
         expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-        user=UserResponse(**user.model_dump())
+        user=ProResponse(**user.model_dump())
     )
 
-@app.post("/api/auth/refresh", response_model=TokenResponse, tags=["Auth"])
-async def refresh_token(request: RefreshTokenRequest):
-    """Refresh access token using refresh token"""
+@app.post("/api/auth/refreshPro", response_model=ProTokenResponse, tags=["Auth - Pro"])
+async def refresh_pro_token(request: ProRefreshRequest):
+    """Refresh Pro access token"""
     payload = decode_token(request.refresh_token)
     
-    if payload.get("type") != "refresh":
-        raise HTTPException(status_code=401, detail="Invalid refresh token")
+    if payload.get("type") != "refresh" or payload.get("role") != UserRole.THERAPIST:
+        raise HTTPException(status_code=401, detail="Invalid Pro refresh token")
     
     user_id = payload.get("sub")
-    if request.refresh_token not in refresh_tokens_db:
+    if request.refresh_token not in pro_refresh_tokens_db:
         raise HTTPException(status_code=401, detail="Refresh token revoked")
     
     user = users_db.get(user_id)
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
+    if not user or user.role != UserRole.THERAPIST:
+        raise HTTPException(status_code=401, detail="Pro user not found")
     
-    # Revoke old refresh token and create new ones
-    del refresh_tokens_db[request.refresh_token]
-    access_token = create_access_token({"sub": user.id, "email": user.email, "role": user.role})
-    new_refresh_token = create_refresh_token(user.id)
+    del pro_refresh_tokens_db[request.refresh_token]
+    access_token = create_access_token({"sub": user.id, "email": user.email, "role": UserRole.THERAPIST})
+    new_refresh_token = create_refresh_token(user.id, UserRole.THERAPIST)
     
-    return TokenResponse(
+    return ProTokenResponse(
         access_token=access_token,
         refresh_token=new_refresh_token,
         expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-        user=UserResponse(**user.model_dump())
+        user=ProResponse(**user.model_dump())
+    )
+
+# ============================================================
+# CLIENT AUTH ENDPOINTS
+# ============================================================
+
+@app.post("/api/auth/registerClient", response_model=ClientTokenResponse, tags=["Auth - Client"])
+async def register_client(user_data: ClientRegister):
+    """Register a new Client account (requires invitation code)"""
+    for u in users_db.values():
+        if u.email == user_data.email:
+            raise HTTPException(status_code=400, detail="Email already registered")
+    
+    # Validate invitation code
+    invitation = invitations_db.get(user_data.invitation_code)
+    if not invitation:
+        raise HTTPException(status_code=400, detail="Invalid invitation code")
+    if invitation.is_used:
+        raise HTTPException(status_code=400, detail="Invitation code already used")
+    if invitation.expires_at < datetime.now():
+        raise HTTPException(status_code=400, detail="Invitation code expired")
+    
+    user_id = str(uuid.uuid4())
+    new_user = UserInDB(
+        id=user_id,
+        email=user_data.email,
+        full_name=user_data.full_name,
+        role=UserRole.CLIENT,
+        hashed_password=hash_password(user_data.password),
+        therapist_id=invitation.therapist_id,
+        avatar_id=invitation.avatar_id,
+        client_profile_id=invitation.client_id
+    )
+    users_db[user_id] = new_user
+    
+    # Mark invitation as used & link user to client profile
+    invitation.is_used = True
+    client_profile = client_profiles_db.get(invitation.client_id)
+    if client_profile:
+        client_profile.user_id = user_id
+    
+    access_token = create_access_token({"sub": user_id, "email": user_data.email, "role": UserRole.CLIENT})
+    refresh_token = create_refresh_token(user_id, UserRole.CLIENT)
+    
+    return ClientTokenResponse(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        user=ClientResponse(**new_user.model_dump())
+    )
+
+@app.post("/api/auth/loginClient", response_model=ClientTokenResponse, tags=["Auth - Client"])
+async def login_client(credentials: ClientLogin):
+    """Login as Client"""
+    user = None
+    for u in users_db.values():
+        if u.email == credentials.email and u.role == UserRole.CLIENT:
+            user = u
+            break
+    
+    if not user or not verify_password(credentials.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    if not user.is_active:
+        raise HTTPException(status_code=401, detail="Account inactive")
+    
+    access_token = create_access_token({"sub": user.id, "email": user.email, "role": UserRole.CLIENT})
+    refresh_token = create_refresh_token(user.id, UserRole.CLIENT)
+    
+    return ClientTokenResponse(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        user=ClientResponse(**user.model_dump())
+    )
+
+@app.post("/api/auth/refreshClient", response_model=ClientTokenResponse, tags=["Auth - Client"])
+async def refresh_client_token(request: ClientRefreshRequest):
+    """Refresh Client access token"""
+    payload = decode_token(request.refresh_token)
+    
+    if payload.get("type") != "refresh" or payload.get("role") != UserRole.CLIENT:
+        raise HTTPException(status_code=401, detail="Invalid Client refresh token")
+    
+    user_id = payload.get("sub")
+    if request.refresh_token not in client_refresh_tokens_db:
+        raise HTTPException(status_code=401, detail="Refresh token revoked")
+    
+    user = users_db.get(user_id)
+    if not user or user.role != UserRole.CLIENT:
+        raise HTTPException(status_code=401, detail="Client user not found")
+    
+    del client_refresh_tokens_db[request.refresh_token]
+    access_token = create_access_token({"sub": user.id, "email": user.email, "role": UserRole.CLIENT})
+    new_refresh_token = create_refresh_token(user.id, UserRole.CLIENT)
+    
+    return ClientTokenResponse(
+        access_token=access_token,
+        refresh_token=new_refresh_token,
+        expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        user=ClientResponse(**user.model_dump())
     )
 
 # ============================================================
 # USER ENDPOINTS
 # ============================================================
 
-@app.get("/api/users/me", response_model=UserResponse, tags=["Users"])
-async def get_me(current_user: UserInDB = Depends(get_current_user)):
-    """Get current user info"""
-    return UserResponse(**current_user.model_dump())
+@app.get("/api/users/me/pro", response_model=ProResponse, tags=["Users"])
+async def get_pro_me(current_user: UserInDB = Depends(get_current_pro)):
+    """Get current Pro (Therapist) user info"""
+    return ProResponse(**current_user.model_dump())
+
+@app.get("/api/users/me/client", response_model=ClientResponse, tags=["Users"])
+async def get_client_me(current_user: UserInDB = Depends(get_current_client)):
+    """Get current Client user info"""
+    return ClientResponse(**current_user.model_dump())
 
 # ============================================================
-# AVATAR ENDPOINTS
+# AVATAR ENDPOINTS (Pro only)
 # ============================================================
 
 @app.get("/api/avatars", response_model=list[AvatarResponse], tags=["Avatars"])
-async def get_avatars(current_user: UserInDB = Depends(get_current_therapist)):
-    """Get all avatars for current therapist"""
+async def get_avatars(current_user: UserInDB = Depends(get_current_pro)):
+    """Get all avatars for current Pro"""
     return [AvatarResponse(**a.model_dump()) for a in avatars_db.values() if a.therapist_id == current_user.id]
 
 @app.post("/api/avatars", response_model=AvatarResponse, tags=["Avatars"])
-async def create_avatar(avatar_data: AvatarCreate, current_user: UserInDB = Depends(get_current_therapist)):
+async def create_avatar(avatar_data: AvatarCreate, current_user: UserInDB = Depends(get_current_pro)):
     """Create a new avatar"""
     avatar_id = str(uuid.uuid4())
     new_avatar = AvatarInDB(
@@ -578,33 +690,28 @@ async def get_avatar(avatar_id: str, current_user: UserInDB = Depends(get_curren
     return AvatarResponse(**avatar.model_dump())
 
 # ============================================================
-# CLIENT ENDPOINTS
+# CLIENT PROFILE ENDPOINTS (Pro only)
 # ============================================================
 
-@app.get("/api/clients", response_model=list[ClientResponse], tags=["Clients"])
-async def get_clients(current_user: UserInDB = Depends(get_current_therapist)):
-    """Get all clients for current therapist"""
+@app.get("/api/clients", response_model=list[ClientProfileResponse], tags=["Clients"])
+async def get_clients(current_user: UserInDB = Depends(get_current_pro)):
+    """Get all client profiles for current Pro"""
     result = []
-    for c in clients_db.values():
+    for c in client_profiles_db.values():
         if c.therapist_id == current_user.id:
             avatar = avatars_db.get(c.avatar_id)
-            client_resp = ClientResponse(
-                **c.model_dump(),
-                avatar_name=avatar.name if avatar else None
-            )
-            result.append(client_resp)
+            result.append(ClientProfileResponse(**c.model_dump(), avatar_name=avatar.name if avatar else None))
     return result
 
-@app.post("/api/clients", response_model=ClientResponse, tags=["Clients"])
-async def create_client(client_data: ClientCreate, current_user: UserInDB = Depends(get_current_therapist)):
-    """Create a new client"""
-    # Validate avatar belongs to therapist
+@app.post("/api/clients", response_model=ClientProfileResponse, tags=["Clients"])
+async def create_client(client_data: ClientProfileCreate, current_user: UserInDB = Depends(get_current_pro)):
+    """Create a new client profile"""
     avatar = avatars_db.get(client_data.avatar_id)
     if not avatar or avatar.therapist_id != current_user.id:
         raise HTTPException(status_code=400, detail="Invalid avatar ID")
     
     client_id = str(uuid.uuid4())
-    new_client = ClientInDB(
+    new_client = ClientProfileInDB(
         id=client_id,
         therapist_id=current_user.id,
         avatar_id=client_data.avatar_id,
@@ -617,35 +724,31 @@ async def create_client(client_data: ClientCreate, current_user: UserInDB = Depe
         goals=client_data.goals,
         therapy_principles=client_data.therapy_principles
     )
-    clients_db[client_id] = new_client
-    
-    # Update avatar client count
+    client_profiles_db[client_id] = new_client
     avatar.client_count += 1
     
-    return ClientResponse(**new_client.model_dump(), avatar_name=avatar.name)
+    return ClientProfileResponse(**new_client.model_dump(), avatar_name=avatar.name)
 
-@app.get("/api/clients/{client_id}", response_model=ClientResponse, tags=["Clients"])
+@app.get("/api/clients/{client_id}", response_model=ClientProfileResponse, tags=["Clients"])
 async def get_client(client_id: str, current_user: UserInDB = Depends(get_current_user)):
-    """Get client by ID"""
-    client = clients_db.get(client_id)
+    """Get client profile by ID"""
+    client = client_profiles_db.get(client_id)
     if not client:
         raise HTTPException(status_code=404, detail="Client not found")
     avatar = avatars_db.get(client.avatar_id)
-    return ClientResponse(**client.model_dump(), avatar_name=avatar.name if avatar else None)
+    return ClientProfileResponse(**client.model_dump(), avatar_name=avatar.name if avatar else None)
 
 # ============================================================
-# INVITATION ENDPOINTS
+# INVITATION ENDPOINTS (Pro only)
 # ============================================================
 
 @app.post("/api/invitations", response_model=InvitationResponse, tags=["Invitations"])
-async def create_invitation(invite_data: InvitationCreate, current_user: UserInDB = Depends(get_current_therapist)):
+async def create_invitation(invite_data: InvitationCreate, current_user: UserInDB = Depends(get_current_pro)):
     """Generate an invitation code for a client"""
-    # Validate client belongs to therapist
-    client = clients_db.get(invite_data.client_id)
+    client = client_profiles_db.get(invite_data.client_id)
     if not client or client.therapist_id != current_user.id:
         raise HTTPException(status_code=400, detail="Invalid client ID")
     
-    # Validate avatar
     avatar = avatars_db.get(invite_data.avatar_id)
     if not avatar or avatar.therapist_id != current_user.id:
         raise HTTPException(status_code=400, detail="Invalid avatar ID")
@@ -662,15 +765,12 @@ async def create_invitation(invite_data: InvitationCreate, current_user: UserInD
     )
     invitations_db[code] = invitation
     
-    # QR data for client app
-    qr_data = f"hamo://invite/{code}"
-    
     return InvitationResponse(
         code=code,
         client_id=invite_data.client_id,
         avatar_id=invite_data.avatar_id,
         expires_at=expires_at,
-        qr_data=qr_data
+        qr_data=f"hamo://invite/{code}"
     )
 
 @app.get("/api/invitations/{code}", tags=["Invitations"])
@@ -709,7 +809,7 @@ async def get_user_ai_mind(user_id: str, avatar_id: str, current_user: UserInDB 
     return user_mind
 
 # ============================================================
-# FEEDBACK ENDPOINTS
+# FEEDBACK ENDPOINTS (Client only)
 # ============================================================
 
 @app.post("/api/feedback/session", response_model=FeedbackResponse, tags=["Feedback"])
