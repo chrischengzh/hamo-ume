@@ -827,15 +827,45 @@ async def validate_invitation(code: str):
         raise HTTPException(status_code=400, detail="Invitation code already used")
     if invitation.expires_at < datetime.now():
         raise HTTPException(status_code=400, detail="Invitation code expired")
-    
+
     avatar = avatars_db.get(invitation.avatar_id)
     therapist = users_db.get(invitation.therapist_id)
-    
+
     return {
         "valid": True,
         "avatar_name": avatar.name if avatar else None,
         "therapist_name": therapist.full_name if therapist else None,
         "expires_at": invitation.expires_at
+    }
+
+# ============================================================
+# CLIENT INVITATION ENDPOINTS
+# ============================================================
+
+class ClientInvitationValidateRequest(BaseModel):
+    invitation_code: str
+
+@app.post("/api/client/invitation/validate", tags=["Invitations"])
+async def validate_client_invitation(request: ClientInvitationValidateRequest):
+    """Validate an invitation code (for hamo-client frontend)"""
+    invitation = invitations_db.get(request.invitation_code)
+    if not invitation:
+        raise HTTPException(status_code=404, detail="Invalid invitation code")
+    if invitation.is_used:
+        raise HTTPException(status_code=400, detail="Invitation code already used")
+    if invitation.expires_at < datetime.now():
+        raise HTTPException(status_code=400, detail="Invitation code expired")
+
+    avatar = avatars_db.get(invitation.avatar_id)
+    therapist = users_db.get(invitation.therapist_id)
+
+    return {
+        "valid": True,
+        "pro_avatar": {
+            "id": avatar.id if avatar else None,
+            "name": avatar.name if avatar else None,
+            "therapist_name": therapist.full_name if therapist else None
+        }
     }
 
 # ============================================================
