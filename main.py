@@ -3,7 +3,7 @@ Hamo-UME: Hamo Unified Mind Engine
 Backend API Server with JWT Authentication
 
 Tech Stack: Python + FastAPI + JWT
-Version: 1.2.5
+Version: 1.2.6
 """
 
 from fastapi import FastAPI, HTTPException, Depends, status
@@ -161,12 +161,18 @@ class ProTokenResponse(BaseModel):
     expires_in: int
     user: ProResponse
 
+class ConnectedAvatar(BaseModel):
+    id: str
+    name: str
+    therapist_name: Optional[str] = None
+
 class ClientTokenResponse(BaseModel):
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
     expires_in: int
     user: ClientResponse
+    connected_avatar: Optional[ConnectedAvatar] = None
 
 # ============================================================
 # AVATAR MODELS
@@ -437,8 +443,8 @@ class MockDataGenerator:
 
 app = FastAPI(
     title="Hamo-UME API",
-    description="Hamo Unified Mind Engine - Backend API v1.2.5",
-    version="1.2.5"
+    description="Hamo Unified Mind Engine - Backend API v1.2.6",
+    version="1.2.6"
 )
 
 app.add_middleware(
@@ -463,7 +469,7 @@ app.add_middleware(
 
 @app.get("/", tags=["Health"])
 async def root():
-    return {"service": "Hamo-UME", "version": "1.2.5", "status": "running"}
+    return {"service": "Hamo-UME", "version": "1.2.6", "status": "running"}
 
 # ============================================================
 # PRO (THERAPIST) AUTH ENDPOINTS
@@ -588,15 +594,27 @@ async def register_client(user_data: ClientRegister):
     client_profile = client_profiles_db.get(invitation.client_id)
     if client_profile:
         client_profile.user_id = user_id
-    
+
+    # Get connected avatar info
+    avatar = avatars_db.get(invitation.avatar_id)
+    therapist = users_db.get(invitation.therapist_id)
+    connected_avatar = None
+    if avatar:
+        connected_avatar = ConnectedAvatar(
+            id=avatar.id,
+            name=avatar.name,
+            therapist_name=therapist.full_name if therapist else None
+        )
+
     access_token = create_access_token({"sub": user_id, "email": user_data.email, "role": UserRole.CLIENT})
     refresh_token = create_refresh_token(user_id, UserRole.CLIENT)
-    
+
     return ClientTokenResponse(
         access_token=access_token,
         refresh_token=refresh_token,
         expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-        user=ClientResponse(**new_user.model_dump())
+        user=ClientResponse(**new_user.model_dump()),
+        connected_avatar=connected_avatar
     )
 
 @app.post("/api/auth/loginClient", response_model=ClientTokenResponse, tags=["Auth - Client"])
