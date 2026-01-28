@@ -3,7 +3,7 @@ Hamo-UME: Hamo Unified Mind Engine
 Backend API Server with JWT Authentication
 
 Tech Stack: Python + FastAPI + JWT
-Version: 1.2.6
+Version: 1.2.7
 """
 
 from fastapi import FastAPI, HTTPException, Depends, status
@@ -443,8 +443,8 @@ class MockDataGenerator:
 
 app = FastAPI(
     title="Hamo-UME API",
-    description="Hamo Unified Mind Engine - Backend API v1.2.6",
-    version="1.2.6"
+    description="Hamo Unified Mind Engine - Backend API v1.2.7",
+    version="1.2.7"
 )
 
 app.add_middleware(
@@ -469,7 +469,7 @@ app.add_middleware(
 
 @app.get("/", tags=["Health"])
 async def root():
-    return {"service": "Hamo-UME", "version": "1.2.6", "status": "running"}
+    return {"service": "Hamo-UME", "version": "1.2.7", "status": "running"}
 
 # ============================================================
 # PRO (THERAPIST) AUTH ENDPOINTS
