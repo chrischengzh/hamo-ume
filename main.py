@@ -3,7 +3,7 @@ Hamo-UME: Hamo Unified Mind Engine
 Backend API Server with JWT Authentication
 
 Tech Stack: Python + FastAPI + JWT
-Version: 1.2.7
+Version: 1.2.9
 """
 
 from fastapi import FastAPI, HTTPException, Depends, status
@@ -443,8 +443,8 @@ class MockDataGenerator:
 
 app = FastAPI(
     title="Hamo-UME API",
-    description="Hamo Unified Mind Engine - Backend API v1.2.7",
-    version="1.2.7"
+    description="Hamo Unified Mind Engine - Backend API v1.2.9",
+    version="1.2.9"
 )
 
 app.add_middleware(
@@ -454,6 +454,7 @@ app.add_middleware(
         "http://localhost:3000",           # 本地开发备用端口
         "https://hamo-pro.vercel.app",     # Vercel 生产环境 - Pro
         "https://hamo-client.vercel.app",  # Vercel 生产环境 - Client
+        "https://hamo-portal.vercel.app",  # Vercel 生产环境 - Portal
         "https://*.vercel.app",            # 所有 Vercel 部署
         "https://hamo.ai",                 # 主域名
         "https://*.hamo.ai",               # 子域名
@@ -469,7 +470,7 @@ app.add_middleware(
 
 @app.get("/", tags=["Health"])
 async def root():
-    return {"service": "Hamo-UME", "version": "1.2.7", "status": "running"}
+    return {"service": "Hamo-UME", "version": "1.2.9", "status": "running"}
 
 # ============================================================
 # PRO (THERAPIST) AUTH ENDPOINTS
@@ -915,6 +916,110 @@ async def submit_session_feedback(feedback: SessionFeedback, current_user: UserI
 async def get_user_feedback(user_id: str, current_user: UserInDB = Depends(get_current_user)):
     """Get feedback history for a user"""
     return [f for f in feedback_storage if f.get("user_id") == user_id]
+
+# ============================================================
+# PORTAL ENDPOINTS (Admin/Analytics)
+# ============================================================
+
+class PortalStatsResponse(BaseModel):
+    total_pros: int
+    total_clients: int
+    total_avatars: int
+    total_sessions: int
+    active_invitations: int
+
+class ProUserStats(BaseModel):
+    id: str
+    email: str
+    full_name: str
+    profession: Optional[str] = None
+    created_at: datetime
+    avatar_count: int
+    client_count: int
+    total_sessions: int
+    is_active: bool
+
+class ProUserDetail(BaseModel):
+    id: str
+    email: str
+    full_name: str
+    profession: Optional[str] = None
+    license_number: Optional[str] = None
+    specializations: list[str] = Field(default_factory=list)
+    created_at: datetime
+    is_active: bool
+    avatars: list[AvatarResponse] = Field(default_factory=list)
+    clients: list[ClientProfileResponse] = Field(default_factory=list)
+
+@app.get("/api/portal/stats", response_model=PortalStatsResponse, tags=["Portal"])
+async def get_portal_stats():
+    """Get overall platform statistics"""
+    total_pros = sum(1 for u in users_db.values() if u.role == UserRole.THERAPIST)
+    total_clients = sum(1 for u in users_db.values() if u.role == UserRole.CLIENT)
+    total_avatars = len(avatars_db)
+    total_sessions = sum(c.sessions for c in client_profiles_db.values())
+    active_invitations = sum(1 for inv in invitations_db.values() if not inv.is_used and inv.expires_at > datetime.now())
+
+    return PortalStatsResponse(
+        total_pros=total_pros,
+        total_clients=total_clients,
+        total_avatars=total_avatars,
+        total_sessions=total_sessions,
+        active_invitations=active_invitations
+    )
+
+@app.get("/api/portal/pro-users", response_model=list[ProUserStats], tags=["Portal"])
+async def get_portal_pro_users():
+    """Get all Pro users with their statistics"""
+    result = []
+    for user in users_db.values():
+        if user.role == UserRole.THERAPIST:
+            avatar_count = sum(1 for a in avatars_db.values() if a.therapist_id == user.id)
+            client_count = sum(1 for c in client_profiles_db.values() if c.therapist_id == user.id)
+            total_sessions = sum(c.sessions for c in client_profiles_db.values() if c.therapist_id == user.id)
+
+            result.append(ProUserStats(
+                id=user.id,
+                email=user.email,
+                full_name=user.full_name,
+                profession=user.profession,
+                created_at=user.created_at,
+                avatar_count=avatar_count,
+                client_count=client_count,
+                total_sessions=total_sessions,
+                is_active=user.is_active
+            ))
+    return result
+
+@app.get("/api/portal/pro-users/{pro_id}/details", response_model=ProUserDetail, tags=["Portal"])
+async def get_portal_pro_user_details(pro_id: str):
+    """Get Pro user details with avatars and clients"""
+    user = users_db.get(pro_id)
+    if not user or user.role != UserRole.THERAPIST:
+        raise HTTPException(status_code=404, detail="Pro user not found")
+
+    # Get all avatars for this pro
+    user_avatars = [AvatarResponse(**a.model_dump()) for a in avatars_db.values() if a.therapist_id == pro_id]
+
+    # Get all clients for this pro
+    user_clients = []
+    for c in client_profiles_db.values():
+        if c.therapist_id == pro_id:
+            avatar = avatars_db.get(c.avatar_id)
+            user_clients.append(ClientProfileResponse(**c.model_dump(), avatar_name=avatar.name if avatar else None))
+
+    return ProUserDetail(
+        id=user.id,
+        email=user.email,
+        full_name=user.full_name,
+        profession=user.profession,
+        license_number=user.license_number,
+        specializations=user.specializations,
+        created_at=user.created_at,
+        is_active=user.is_active,
+        avatars=user_avatars,
+        clients=user_clients
+    )
 
 # For Vercel deployment
 app = app
