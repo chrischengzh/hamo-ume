@@ -3,7 +3,7 @@ Hamo-UME: Hamo Unified Mind Engine
 Backend API Server with JWT Authentication
 
 Tech Stack: Python + FastAPI + JWT
-Version: 1.2.9
+Version: 1.3.0
 """
 
 from fastapi import FastAPI, HTTPException, Depends, status
@@ -443,8 +443,8 @@ class MockDataGenerator:
 
 app = FastAPI(
     title="Hamo-UME API",
-    description="Hamo Unified Mind Engine - Backend API v1.2.9",
-    version="1.2.9"
+    description="Hamo Unified Mind Engine - Backend API v1.3.0",
+    version="1.3.0"
 )
 
 app.add_middleware(
@@ -470,7 +470,7 @@ app.add_middleware(
 
 @app.get("/", tags=["Health"])
 async def root():
-    return {"service": "Hamo-UME", "version": "1.2.9", "status": "running"}
+    return {"service": "Hamo-UME", "version": "1.3.0", "status": "running"}
 
 # ============================================================
 # PRO (THERAPIST) AUTH ENDPOINTS
@@ -578,6 +578,36 @@ async def register_client(user_data: ClientRegister):
         raise HTTPException(status_code=400, detail="Invitation code expired")
     
     user_id = str(uuid.uuid4())
+
+    # Create or get client profile
+    client_profile_id = invitation.client_id
+    if not client_profile_id or client_profile_id == "":
+        # Auto-create client profile if not exists
+        client_profile_id = str(uuid.uuid4())
+        avatar = avatars_db.get(invitation.avatar_id)
+        new_client_profile = ClientProfileInDB(
+            id=client_profile_id,
+            therapist_id=invitation.therapist_id,
+            avatar_id=invitation.avatar_id,
+            user_id=user_id,
+            name=user_data.nickname,
+            sex=None,
+            age=None,
+            emotion_pattern=None,
+            personality=None,
+            cognition=None,
+            goals=None,
+            therapy_principles=None
+        )
+        client_profiles_db[client_profile_id] = new_client_profile
+        if avatar:
+            avatar.client_count += 1
+    else:
+        # Link to existing client profile
+        client_profile = client_profiles_db.get(client_profile_id)
+        if client_profile:
+            client_profile.user_id = user_id
+
     new_user = UserInDB(
         id=user_id,
         email=user_data.email,
@@ -586,15 +616,12 @@ async def register_client(user_data: ClientRegister):
         hashed_password=hash_password(user_data.password),
         therapist_id=invitation.therapist_id,
         avatar_id=invitation.avatar_id,
-        client_profile_id=invitation.client_id
+        client_profile_id=client_profile_id
     )
     users_db[user_id] = new_user
-    
-    # Mark invitation as used & link user to client profile
+
+    # Mark invitation as used
     invitation.is_used = True
-    client_profile = client_profiles_db.get(invitation.client_id)
-    if client_profile:
-        client_profile.user_id = user_id
 
     # Get connected avatar info
     avatar = avatars_db.get(invitation.avatar_id)
