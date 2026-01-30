@@ -3,7 +3,7 @@ Hamo-UME: Hamo Unified Mind Engine
 Backend API Server with JWT Authentication
 
 Tech Stack: Python + FastAPI + JWT
-Version: 1.2.8
+Version: 1.2.7
 """
 
 from fastapi import FastAPI, HTTPException, Depends, status
@@ -101,7 +101,7 @@ class ProRefreshRequest(BaseModel):
 class ClientRegister(BaseModel):
     email: EmailStr
     password: str
-    full_name: str
+    nickname: str  # Changed from full_name to match hamo-client frontend
     invitation_code: str  # Required for client registration
 
 class ClientLogin(BaseModel):
@@ -161,12 +161,18 @@ class ProTokenResponse(BaseModel):
     expires_in: int
     user: ProResponse
 
+class ConnectedAvatar(BaseModel):
+    id: str
+    name: str
+    therapist_name: Optional[str] = None
+
 class ClientTokenResponse(BaseModel):
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
     expires_in: int
     user: ClientResponse
+    connected_avatar: Optional[ConnectedAvatar] = None
 
 # ============================================================
 # AVATAR MODELS
@@ -437,8 +443,8 @@ class MockDataGenerator:
 
 app = FastAPI(
     title="Hamo-UME API",
-    description="Hamo Unified Mind Engine - Backend API v1.2.8",
-    version="1.2.8"
+    description="Hamo Unified Mind Engine - Backend API v1.2.7",
+    version="1.2.7"
 )
 
 app.add_middleware(
@@ -448,7 +454,6 @@ app.add_middleware(
         "http://localhost:3000",           # 本地开发备用端口
         "https://hamo-pro.vercel.app",     # Vercel 生产环境 - Pro
         "https://hamo-client.vercel.app",  # Vercel 生产环境 - Client
-        "https://hamo-portal.vercel.app",  # Vercel 生产环境 - Portal
         "https://*.vercel.app",            # 所有 Vercel 部署
         "https://hamo.ai",                 # 主域名
         "https://*.hamo.ai",               # 子域名
@@ -464,102 +469,7 @@ app.add_middleware(
 
 @app.get("/", tags=["Health"])
 async def root():
-    return {"service": "Hamo-UME", "version": "1.2.8", "status": "running"}
-
-# ============================================================
-# PORTAL ENDPOINTS (Public)
-# ============================================================
-
-@app.get("/api/portal/stats", tags=["Portal"])
-async def get_portal_stats():
-    """Get overall platform statistics"""
-    pro_count = len([u for u in users_db.values() if u.role == UserRole.THERAPIST])
-    client_count = len([u for u in users_db.values() if u.role == UserRole.CLIENT])
-    avatar_count = len(avatars_db)
-    
-    return {
-        "total_pro_users": pro_count,
-        "total_avatars": avatar_count,
-        "total_client_users": client_count
-    }
-
-@app.get("/api/portal/pro-users", tags=["Portal"])
-async def get_portal_pro_users():
-    """Get all Pro users with their statistics"""
-    pro_users = []
-    
-    for user in users_db.values():
-        if user.role == UserRole.THERAPIST:
-            # Get avatars for this pro
-            user_avatars = [a for a in avatars_db.values() if a.therapist_id == user.id]
-            avatar_ids = [a.id for a in user_avatars]
-            
-            # Get total clients across all avatars
-            total_clients = len([c for c in client_profiles_db.values() if c.therapist_id == user.id])
-            
-            pro_users.append({
-                "id": user.id,
-                "full_name": user.full_name,
-                "email": user.email,
-                "profession": user.profession,
-                "avatar_url": f"https://api.dicebear.com/7.x/initials/svg?seed={user.full_name}",
-                "created_at": user.created_at,
-                "last_active": user.created_at,  # TODO: 实现真实的最后活跃时间
-                "avatar_count": len(user_avatars),
-                "total_clients": total_clients
-            })
-    
-    return {"pro_users": pro_users}
-
-@app.get("/api/portal/pro-users/{pro_id}/details", tags=["Portal"])
-async def get_portal_pro_user_details(pro_id: str):
-    """Get Pro user details with avatars and clients"""
-    user = users_db.get(pro_id)
-    if not user or user.role != UserRole.THERAPIST:
-        raise HTTPException(status_code=404, detail="Pro user not found")
-    
-    # Get avatars
-    avatars_with_clients = []
-    for avatar in avatars_db.values():
-        if avatar.therapist_id == pro_id:
-            # Get clients for this avatar
-            clients = []
-            for client in client_profiles_db.values():
-                if client.avatar_id == avatar.id:
-                    # Find linked user account
-                    client_user = None
-                    if client.user_id:
-                        client_user = users_db.get(client.user_id)
-                    
-                    clients.append({
-                        "id": client.id,
-                        "name": client.name,
-                        "avatar_url": f"https://api.dicebear.com/7.x/initials/svg?seed={client.name}",
-                        "created_at": client.created_at,
-                        "last_active": client_user.created_at if client_user else client.created_at,
-                        "is_registered": client.user_id is not None
-                    })
-            
-            avatars_with_clients.append({
-                "id": avatar.id,
-                "name": avatar.name,
-                "theory": avatar.theory,
-                "methodology": avatar.methodology,
-                "created_at": avatar.created_at,
-                "clients": clients
-            })
-    
-    return {
-        "pro_user": {
-            "id": user.id,
-            "full_name": user.full_name,
-            "email": user.email,
-            "profession": user.profession,
-            "avatar_url": f"https://api.dicebear.com/7.x/initials/svg?seed={user.full_name}",
-            "created_at": user.created_at
-        },
-        "avatars": avatars_with_clients
-    }
+    return {"service": "Hamo-UME", "version": "1.2.7", "status": "running"}
 
 # ============================================================
 # PRO (THERAPIST) AUTH ENDPOINTS
@@ -670,7 +580,7 @@ async def register_client(user_data: ClientRegister):
     new_user = UserInDB(
         id=user_id,
         email=user_data.email,
-        full_name=user_data.full_name,
+        full_name=user_data.nickname,  # Use nickname from client frontend
         role=UserRole.CLIENT,
         hashed_password=hash_password(user_data.password),
         therapist_id=invitation.therapist_id,
@@ -684,15 +594,27 @@ async def register_client(user_data: ClientRegister):
     client_profile = client_profiles_db.get(invitation.client_id)
     if client_profile:
         client_profile.user_id = user_id
-    
+
+    # Get connected avatar info
+    avatar = avatars_db.get(invitation.avatar_id)
+    therapist = users_db.get(invitation.therapist_id)
+    connected_avatar = None
+    if avatar:
+        connected_avatar = ConnectedAvatar(
+            id=avatar.id,
+            name=avatar.name,
+            therapist_name=therapist.full_name if therapist else None
+        )
+
     access_token = create_access_token({"sub": user_id, "email": user_data.email, "role": UserRole.CLIENT})
     refresh_token = create_refresh_token(user_id, UserRole.CLIENT)
-    
+
     return ClientTokenResponse(
         access_token=access_token,
         refresh_token=refresh_token,
         expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-        user=ClientResponse(**new_user.model_dump())
+        user=ClientResponse(**new_user.model_dump()),
+        connected_avatar=connected_avatar
     )
 
 @app.post("/api/auth/loginClient", response_model=ClientTokenResponse, tags=["Auth - Client"])
@@ -846,6 +768,37 @@ async def get_client(client_id: str, current_user: UserInDB = Depends(get_curren
 # INVITATION ENDPOINTS (Pro only)
 # ============================================================
 
+class ProInvitationGenerateRequest(BaseModel):
+    avatar_id: str
+
+class ProInvitationGenerateResponse(BaseModel):
+    invitation_code: str
+    expires_at: datetime
+
+@app.post("/api/pro/invitation/generate", response_model=ProInvitationGenerateResponse, tags=["Invitations"])
+async def generate_pro_invitation(invite_data: ProInvitationGenerateRequest, current_user: UserInDB = Depends(get_current_pro)):
+    """Generate an invitation code for a client (Pro endpoint for hamo-pro frontend)"""
+    avatar = avatars_db.get(invite_data.avatar_id)
+    if not avatar or avatar.therapist_id != current_user.id:
+        raise HTTPException(status_code=400, detail="Invalid avatar ID")
+
+    code = f"HAMO-{str(uuid.uuid4())[:6].upper()}"
+    expires_at = datetime.now() + timedelta(days=7)
+
+    invitation = InvitationInDB(
+        code=code,
+        therapist_id=current_user.id,
+        client_id="",  # Client ID will be assigned when client registers
+        avatar_id=invite_data.avatar_id,
+        expires_at=expires_at
+    )
+    invitations_db[code] = invitation
+
+    return ProInvitationGenerateResponse(
+        invitation_code=code,
+        expires_at=expires_at
+    )
+
 @app.post("/api/invitations", response_model=InvitationResponse, tags=["Invitations"])
 async def create_invitation(invite_data: InvitationCreate, current_user: UserInDB = Depends(get_current_pro)):
     """Generate an invitation code for a client"""
@@ -887,15 +840,45 @@ async def validate_invitation(code: str):
         raise HTTPException(status_code=400, detail="Invitation code already used")
     if invitation.expires_at < datetime.now():
         raise HTTPException(status_code=400, detail="Invitation code expired")
-    
+
     avatar = avatars_db.get(invitation.avatar_id)
     therapist = users_db.get(invitation.therapist_id)
-    
+
     return {
         "valid": True,
         "avatar_name": avatar.name if avatar else None,
         "therapist_name": therapist.full_name if therapist else None,
         "expires_at": invitation.expires_at
+    }
+
+# ============================================================
+# CLIENT INVITATION ENDPOINTS
+# ============================================================
+
+class ClientInvitationValidateRequest(BaseModel):
+    invitation_code: str
+
+@app.post("/api/client/invitation/validate", tags=["Invitations"])
+async def validate_client_invitation(request: ClientInvitationValidateRequest):
+    """Validate an invitation code (for hamo-client frontend)"""
+    invitation = invitations_db.get(request.invitation_code)
+    if not invitation:
+        raise HTTPException(status_code=404, detail="Invalid invitation code")
+    if invitation.is_used:
+        raise HTTPException(status_code=400, detail="Invitation code already used")
+    if invitation.expires_at < datetime.now():
+        raise HTTPException(status_code=400, detail="Invitation code expired")
+
+    avatar = avatars_db.get(invitation.avatar_id)
+    therapist = users_db.get(invitation.therapist_id)
+
+    return {
+        "valid": True,
+        "pro_avatar": {
+            "id": avatar.id if avatar else None,
+            "name": avatar.name if avatar else None,
+            "therapist_name": therapist.full_name if therapist else None
+        }
     }
 
 # ============================================================
