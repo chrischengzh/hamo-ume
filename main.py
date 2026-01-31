@@ -3,7 +3,7 @@ Hamo-UME: Hamo Unified Mind Engine
 Backend API Server with JWT Authentication
 
 Tech Stack: Python + FastAPI + JWT
-Version: 1.3.5
+Version: 1.3.6
 """
 
 from fastapi import FastAPI, HTTPException, Depends, status
@@ -522,8 +522,8 @@ class MockDataGenerator:
 
 app = FastAPI(
     title="Hamo-UME API",
-    description="Hamo Unified Mind Engine - Backend API v1.3.5",
-    version="1.3.5"
+    description="Hamo Unified Mind Engine - Backend API v1.3.6",
+    version="1.3.6"
 )
 
 app.add_middleware(
@@ -549,7 +549,7 @@ app.add_middleware(
 
 @app.get("/", tags=["Health"])
 async def root():
-    return {"service": "Hamo-UME", "version": "1.3.5", "status": "running"}
+    return {"service": "Hamo-UME", "version": "1.3.6", "status": "running"}
 
 # ============================================================
 # PRO (THERAPIST) AUTH ENDPOINTS
@@ -1140,17 +1140,20 @@ async def submit_supervision_feedback(
     request: SupervisionFeedbackRequest,
     current_user: UserInDB = Depends(get_current_pro)
 ):
-    """Submit supervision feedback for a client's AI Mind profile (Pro only)
+    """Submit supervision feedback for a client's AI Mind profile (Pro only)"""
+    # Verify the user exists
+    user = users_db.get(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
 
-    Note: user_id can be either a User ID or Client Profile ID.
-    Since we use in-memory storage, we don't strictly validate user existence.
-    """
-    # Try to verify avatar belongs to current pro (if avatar exists in memory)
+    # Verify the avatar exists and belongs to current pro
     avatar = avatars_db.get(avatar_id)
-    if avatar and avatar.therapist_id != current_user.id:
+    if not avatar:
+        raise HTTPException(status_code=404, detail="Avatar not found")
+    if avatar.therapist_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized to supervise this avatar")
 
-    # Store the feedback (allow even if user/avatar not in memory - they may exist in production DB)
+    # Store the feedback
     cache_key = f"{user_id}_{avatar_id}"
     if cache_key not in supervision_feedback_db:
         supervision_feedback_db[cache_key] = []
