@@ -3,7 +3,7 @@ Hamo-UME: Hamo Unified Mind Engine
 Backend API Server with JWT Authentication
 
 Tech Stack: Python + FastAPI + JWT
-Version: 1.3.6
+Version: 1.3.7
 """
 
 from fastapi import FastAPI, HTTPException, Depends, status
@@ -274,8 +274,9 @@ class InvitationCreate(BaseModel):
 class InvitationInDB(BaseModel):
     code: str
     therapist_id: str
-    client_id: str
+    client_id: str  # Legacy field
     avatar_id: str
+    mind_id: Optional[str] = None  # New: link to AI Mind
     created_at: datetime = Field(default_factory=datetime.now)
     expires_at: datetime
     is_used: bool = False
@@ -284,6 +285,7 @@ class InvitationResponse(BaseModel):
     code: str
     client_id: str
     avatar_id: str
+    mind_id: Optional[str] = None
     expires_at: datetime
     qr_data: str
 
@@ -324,6 +326,7 @@ class RelationshipManipulations(BaseModel):
     intimacy_comfort: float = Field(ge=0, le=1)
 
 class UserAIMind(BaseModel):
+    """Legacy model for mock data generation"""
     user_id: str
     avatar_id: str
     personality: PersonalityCharacteristics
@@ -332,6 +335,73 @@ class UserAIMind(BaseModel):
     relationship_manipulations: RelationshipManipulations
     last_updated: datetime = Field(default_factory=datetime.now)
     confidence_score: float = Field(ge=0, le=1)
+
+# New AI Mind models for Pro-created client profiles
+class PersonalityInput(BaseModel):
+    """Personality input from Pro"""
+    primary_traits: list[str] = Field(default_factory=list)
+    description: str = ""
+
+class EmotionPatternInput(BaseModel):
+    """Emotion pattern input from Pro"""
+    dominant_emotions: list[str] = Field(default_factory=list)
+    triggers: list[str] = Field(default_factory=list)
+    coping_mechanisms: list[str] = Field(default_factory=list)
+    description: str = ""
+
+class CognitionBeliefsInput(BaseModel):
+    """Cognition beliefs input from Pro"""
+    core_beliefs: list[str] = Field(default_factory=list)
+    cognitive_distortions: list[str] = Field(default_factory=list)
+    thinking_patterns: list[str] = Field(default_factory=list)
+    self_perception: str = ""
+    world_perception: str = ""
+    future_perception: str = ""
+
+class RelationshipInput(BaseModel):
+    """Relationship input from Pro"""
+    attachment_style: str = "secure"
+    relationship_patterns: list[str] = Field(default_factory=list)
+    communication_style: str = ""
+    conflict_resolution: str = ""
+
+class AIMindCreate(BaseModel):
+    """Request body for creating AI Mind"""
+    avatar_id: str
+    name: str
+    sex: Optional[str] = None
+    age: Optional[int] = None
+    personality: Optional[PersonalityInput] = None
+    emotion_pattern: Optional[EmotionPatternInput] = None
+    cognition_beliefs: Optional[CognitionBeliefsInput] = None
+    relationship_manipulations: Optional[RelationshipInput] = None
+    goals: Optional[str] = None
+    therapy_principles: Optional[str] = None
+
+class AIMindInDB(BaseModel):
+    """AI Mind stored in database"""
+    id: str
+    user_id: Optional[str] = None  # null until client registers
+    avatar_id: str
+    therapist_id: str
+    name: str
+    sex: Optional[str] = None
+    age: Optional[int] = None
+    personality: Optional[PersonalityInput] = None
+    emotion_pattern: Optional[EmotionPatternInput] = None
+    cognition_beliefs: Optional[CognitionBeliefsInput] = None
+    relationship_manipulations: Optional[RelationshipInput] = None
+    goals: Optional[str] = None
+    therapy_principles: Optional[str] = None
+    connected_at: Optional[datetime] = None  # null until client registers
+    created_at: datetime = Field(default_factory=datetime.now)
+    sessions: int = 0
+    avg_time: int = 0
+
+class AIMindResponse(AIMindInDB):
+    """AI Mind response with avatar info"""
+    avatar_name: Optional[str] = None
+    invitation_code: Optional[str] = None  # Include if not connected
 
 # ============================================================
 # FEEDBACK MODELS
@@ -364,7 +434,8 @@ avatars_db: dict[str, AvatarInDB] = {}
 client_profiles_db: dict[str, ClientProfileInDB] = {}
 invitations_db: dict[str, InvitationInDB] = {}
 client_avatar_connections_db: dict[str, ClientAvatarConnectionInDB] = {}  # connection_id -> connection
-mind_cache: dict[str, UserAIMind] = {}
+ai_minds_db: dict[str, AIMindInDB] = {}  # mind_id -> AI Mind
+mind_cache: dict[str, UserAIMind] = {}  # Legacy cache for mock data
 feedback_storage: list[dict] = []
 pro_refresh_tokens_db: dict[str, str] = {}  # refresh_token -> user_id
 client_refresh_tokens_db: dict[str, str] = {}  # refresh_token -> user_id
@@ -522,8 +593,8 @@ class MockDataGenerator:
 
 app = FastAPI(
     title="Hamo-UME API",
-    description="Hamo Unified Mind Engine - Backend API v1.3.6",
-    version="1.3.6"
+    description="Hamo Unified Mind Engine - Backend API v1.3.7",
+    version="1.3.7"
 )
 
 app.add_middleware(
@@ -549,7 +620,7 @@ app.add_middleware(
 
 @app.get("/", tags=["Health"])
 async def root():
-    return {"service": "Hamo-UME", "version": "1.3.6", "status": "running"}
+    return {"service": "Hamo-UME", "version": "1.3.7", "status": "running"}
 
 # ============================================================
 # PRO (THERAPIST) AUTH ENDPOINTS
@@ -655,10 +726,18 @@ async def register_client(user_data: ClientRegister):
         raise HTTPException(status_code=400, detail="Invitation code already used")
     if invitation.expires_at < datetime.now():
         raise HTTPException(status_code=400, detail="Invitation code expired")
-    
-    user_id = str(uuid.uuid4())
 
-    # Create or get client profile
+    user_id = str(uuid.uuid4())
+    now = datetime.now()
+
+    # Bind to AI Mind if mind_id exists in invitation
+    if invitation.mind_id:
+        mind = ai_minds_db.get(invitation.mind_id)
+        if mind:
+            mind.user_id = user_id
+            mind.connected_at = now
+
+    # Legacy: Create or get client profile
     client_profile_id = invitation.client_id
     if not client_profile_id or client_profile_id == "":
         # Auto-create client profile if not exists
@@ -864,31 +943,102 @@ async def get_avatar(avatar_id: str, current_user: UserInDB = Depends(get_curren
     return AvatarResponse(**avatar.model_dump())
 
 # ============================================================
-# CLIENT PROFILE ENDPOINTS (Pro only)
+# AI MIND ENDPOINTS (Pro creates client AI Mind)
 # ============================================================
 
-@app.get("/api/clients", response_model=list[ClientProfileResponse], tags=["Clients"])
+@app.post("/api/mind", response_model=AIMindResponse, tags=["AI Mind"])
+async def create_ai_mind(mind_data: AIMindCreate, current_user: UserInDB = Depends(get_current_pro)):
+    """Create a new AI Mind for a client (Pro only)"""
+    # Verify avatar exists and belongs to current pro
+    avatar = avatars_db.get(mind_data.avatar_id)
+    if not avatar:
+        raise HTTPException(status_code=404, detail="Avatar not found")
+    if avatar.therapist_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Avatar does not belong to you")
+
+    mind_id = str(uuid.uuid4())
+    new_mind = AIMindInDB(
+        id=mind_id,
+        user_id=None,  # Will be set when client registers
+        avatar_id=mind_data.avatar_id,
+        therapist_id=current_user.id,
+        name=mind_data.name,
+        sex=mind_data.sex,
+        age=mind_data.age,
+        personality=mind_data.personality,
+        emotion_pattern=mind_data.emotion_pattern,
+        cognition_beliefs=mind_data.cognition_beliefs,
+        relationship_manipulations=mind_data.relationship_manipulations,
+        goals=mind_data.goals,
+        therapy_principles=mind_data.therapy_principles,
+        connected_at=None,
+        created_at=datetime.now()
+    )
+    ai_minds_db[mind_id] = new_mind
+    avatar.client_count += 1
+
+    return AIMindResponse(
+        **new_mind.model_dump(),
+        avatar_name=avatar.name
+    )
+
+@app.get("/api/mind/{mind_id}", response_model=AIMindResponse, tags=["AI Mind"])
+async def get_ai_mind(mind_id: str, current_user: UserInDB = Depends(get_current_user)):
+    """Get AI Mind by ID"""
+    mind = ai_minds_db.get(mind_id)
+    if not mind:
+        raise HTTPException(status_code=404, detail="AI Mind not found")
+
+    avatar = avatars_db.get(mind.avatar_id)
+
+    # Find invitation code if not connected
+    invitation_code = None
+    if mind.connected_at is None:
+        for inv in invitations_db.values():
+            if inv.mind_id == mind_id and not inv.is_used:
+                invitation_code = inv.code
+                break
+
+    return AIMindResponse(
+        **mind.model_dump(),
+        avatar_name=avatar.name if avatar else None,
+        invitation_code=invitation_code
+    )
+
+# ============================================================
+# CLIENT PROFILE ENDPOINTS (Pro only) - Now returns AI Minds
+# ============================================================
+
+@app.get("/api/clients", response_model=list[AIMindResponse], tags=["Clients"])
 async def get_clients(current_user: UserInDB = Depends(get_current_pro)):
-    """Get all client profiles for current Pro"""
+    """Get all AI Minds (clients) for current Pro, including unconnected ones"""
     result = []
-    for c in client_profiles_db.values():
-        if c.therapist_id == current_user.id:
-            avatar = avatars_db.get(c.avatar_id)
-            connected_at = get_client_connected_at(c)
-            result.append(ClientProfileResponse(
-                **c.model_dump(),
+    for mind in ai_minds_db.values():
+        if mind.therapist_id == current_user.id:
+            avatar = avatars_db.get(mind.avatar_id)
+
+            # Find invitation code if not connected
+            invitation_code = None
+            if mind.connected_at is None:
+                for inv in invitations_db.values():
+                    if inv.mind_id == mind.id and not inv.is_used:
+                        invitation_code = inv.code
+                        break
+
+            result.append(AIMindResponse(
+                **mind.model_dump(),
                 avatar_name=avatar.name if avatar else None,
-                connected_at=connected_at
+                invitation_code=invitation_code
             ))
     return result
 
 @app.post("/api/clients", response_model=ClientProfileResponse, tags=["Clients"])
 async def create_client(client_data: ClientProfileCreate, current_user: UserInDB = Depends(get_current_pro)):
-    """Create a new client profile"""
+    """Create a new client profile (Legacy endpoint)"""
     avatar = avatars_db.get(client_data.avatar_id)
     if not avatar or avatar.therapist_id != current_user.id:
         raise HTTPException(status_code=400, detail="Invalid avatar ID")
-    
+
     client_id = str(uuid.uuid4())
     new_client = ClientProfileInDB(
         id=client_id,
@@ -905,21 +1055,46 @@ async def create_client(client_data: ClientProfileCreate, current_user: UserInDB
     )
     client_profiles_db[client_id] = new_client
     avatar.client_count += 1
-    
+
     return ClientProfileResponse(**new_client.model_dump(), avatar_name=avatar.name)
 
-@app.get("/api/clients/{client_id}", response_model=ClientProfileResponse, tags=["Clients"])
+@app.get("/api/clients/{client_id}", response_model=AIMindResponse, tags=["Clients"])
 async def get_client(client_id: str, current_user: UserInDB = Depends(get_current_user)):
-    """Get client profile by ID"""
+    """Get client (AI Mind) by ID"""
+    # First try AI Mind
+    mind = ai_minds_db.get(client_id)
+    if mind:
+        avatar = avatars_db.get(mind.avatar_id)
+        invitation_code = None
+        if mind.connected_at is None:
+            for inv in invitations_db.values():
+                if inv.mind_id == mind.id and not inv.is_used:
+                    invitation_code = inv.code
+                    break
+        return AIMindResponse(
+            **mind.model_dump(),
+            avatar_name=avatar.name if avatar else None,
+            invitation_code=invitation_code
+        )
+
+    # Fallback to legacy client profile
     client = client_profiles_db.get(client_id)
     if not client:
         raise HTTPException(status_code=404, detail="Client not found")
     avatar = avatars_db.get(client.avatar_id)
     connected_at = get_client_connected_at(client)
-    return ClientProfileResponse(
-        **client.model_dump(),
-        avatar_name=avatar.name if avatar else None,
-        connected_at=connected_at
+    # Convert to AIMindResponse format
+    return AIMindResponse(
+        id=client.id,
+        user_id=client.user_id,
+        avatar_id=client.avatar_id,
+        therapist_id=client.therapist_id,
+        name=client.name,
+        sex=client.sex,
+        age=client.age,
+        connected_at=connected_at,
+        created_at=datetime.now(),
+        avatar_name=avatar.name if avatar else None
     )
 
 # ============================================================
@@ -927,16 +1102,35 @@ async def get_client(client_id: str, current_user: UserInDB = Depends(get_curren
 # ============================================================
 
 class ProInvitationGenerateRequest(BaseModel):
-    avatar_id: str
+    avatar_id: Optional[str] = None  # Legacy field
+    mind_id: Optional[str] = None  # New: use mind_id
 
 class ProInvitationGenerateResponse(BaseModel):
     invitation_code: str
     expires_at: datetime
+    mind_id: Optional[str] = None
 
 @app.post("/api/pro/invitation/generate", response_model=ProInvitationGenerateResponse, tags=["Invitations"])
 async def generate_pro_invitation(invite_data: ProInvitationGenerateRequest, current_user: UserInDB = Depends(get_current_pro)):
     """Generate an invitation code for a client (Pro endpoint for hamo-pro frontend)"""
-    avatar = avatars_db.get(invite_data.avatar_id)
+    avatar_id = None
+    mind_id = invite_data.mind_id
+
+    # If mind_id is provided, use it to get avatar_id
+    if mind_id:
+        mind = ai_minds_db.get(mind_id)
+        if not mind:
+            raise HTTPException(status_code=404, detail="AI Mind not found")
+        if mind.therapist_id != current_user.id:
+            raise HTTPException(status_code=403, detail="AI Mind does not belong to you")
+        avatar_id = mind.avatar_id
+    elif invite_data.avatar_id:
+        # Legacy: use avatar_id directly
+        avatar_id = invite_data.avatar_id
+    else:
+        raise HTTPException(status_code=400, detail="Either mind_id or avatar_id is required")
+
+    avatar = avatars_db.get(avatar_id)
     if not avatar or avatar.therapist_id != current_user.id:
         raise HTTPException(status_code=400, detail="Invalid avatar ID")
 
@@ -946,15 +1140,17 @@ async def generate_pro_invitation(invite_data: ProInvitationGenerateRequest, cur
     invitation = InvitationInDB(
         code=code,
         therapist_id=current_user.id,
-        client_id="",  # Client ID will be assigned when client registers
-        avatar_id=invite_data.avatar_id,
+        client_id="",  # Legacy field
+        avatar_id=avatar_id,
+        mind_id=mind_id,
         expires_at=expires_at
     )
     invitations_db[code] = invitation
 
     return ProInvitationGenerateResponse(
         invitation_code=code,
-        expires_at=expires_at
+        expires_at=expires_at,
+        mind_id=mind_id
     )
 
 @app.post("/api/invitations", response_model=InvitationResponse, tags=["Invitations"])
