@@ -1272,6 +1272,14 @@ async def connect_avatar(request: InvitationCodeRequest, current_user: UserInDB 
     # Create new connection (without removing existing connections - multi-avatar support)
     create_client_avatar_connection(current_user.id, invitation.avatar_id)
 
+    # Bind to AI Mind if mind_id exists in invitation
+    now = datetime.now()
+    if invitation.mind_id:
+        mind = ai_minds_db.get(invitation.mind_id)
+        if mind:
+            mind.user_id = current_user.id
+            mind.connected_at = now
+
     # Mark invitation as used
     invitation.is_used = True
 
