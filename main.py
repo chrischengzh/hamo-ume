@@ -1431,7 +1431,7 @@ class ProUserDetail(BaseModel):
     created_at: datetime
     is_active: bool
     avatars: list[AvatarResponse] = Field(default_factory=list)
-    clients: list[ClientProfileResponse] = Field(default_factory=list)
+    clients: list[AIMindResponse] = Field(default_factory=list)  # Changed to AIMindResponse
 
 @app.get("/api/portal/stats", response_model=PortalStatsResponse, tags=["Portal"])
 async def get_portal_stats():
@@ -1475,7 +1475,7 @@ async def get_portal_pro_users():
 
 @app.get("/api/portal/pro-users/{pro_id}/details", response_model=ProUserDetail, tags=["Portal"])
 async def get_portal_pro_user_details(pro_id: str):
-    """Get Pro user details with avatars and clients"""
+    """Get Pro user details with avatars and clients (AI Minds)"""
     user = users_db.get(pro_id)
     if not user or user.role != UserRole.THERAPIST:
         raise HTTPException(status_code=404, detail="Pro user not found")
@@ -1483,16 +1483,24 @@ async def get_portal_pro_user_details(pro_id: str):
     # Get all avatars for this pro
     user_avatars = [AvatarResponse(**a.model_dump()) for a in avatars_db.values() if a.therapist_id == pro_id]
 
-    # Get all clients for this pro
+    # Get all AI Minds (clients) for this pro - same logic as /api/clients
     user_clients = []
-    for c in client_profiles_db.values():
-        if c.therapist_id == pro_id:
-            avatar = avatars_db.get(c.avatar_id)
-            connected_at = get_client_connected_at(c)
-            user_clients.append(ClientProfileResponse(
-                **c.model_dump(),
+    for mind in ai_minds_db.values():
+        if mind.therapist_id == pro_id:
+            avatar = avatars_db.get(mind.avatar_id)
+
+            # Find invitation code if not connected
+            invitation_code = None
+            if mind.connected_at is None:
+                for inv in invitations_db.values():
+                    if inv.mind_id == mind.id and not inv.is_used:
+                        invitation_code = inv.code
+                        break
+
+            user_clients.append(AIMindResponse(
+                **mind.model_dump(),
                 avatar_name=avatar.name if avatar else None,
-                connected_at=connected_at
+                invitation_code=invitation_code
             ))
 
     return ProUserDetail(
