@@ -3,7 +3,7 @@ Hamo-UME: Hamo Unified Mind Engine
 Backend API Server with JWT Authentication
 
 Tech Stack: Python + FastAPI + JWT
-Version: 1.3.9
+Version: 1.3.7
 """
 
 from fastapi import FastAPI, HTTPException, Depends, status
@@ -198,7 +198,6 @@ class AvatarCreate(BaseModel):
     about: str = Field(..., min_length=1, max_length=280, description="About description (required, max 280 chars)")
     experience_years: int = Field(..., ge=0, description="Years of experience (required)")
     experience_months: int = Field(..., ge=0, le=11, description="Months of experience (required, 0-11)")
-    specializations: list[str] = Field(..., min_length=1, max_length=3, description="Specializations (required, 1-3)")
 
 class AvatarInDB(BaseModel):
     id: str
@@ -209,7 +208,6 @@ class AvatarInDB(BaseModel):
     about: str = ""
     experience_years: int = 0
     experience_months: int = 0
-    specializations: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=datetime.now)
     is_active: bool = True
     client_count: int = 0
@@ -597,8 +595,8 @@ class MockDataGenerator:
 
 app = FastAPI(
     title="Hamo-UME API",
-    description="Hamo Unified Mind Engine - Backend API v1.3.9",
-    version="1.3.9"
+    description="Hamo Unified Mind Engine - Backend API v1.3.7",
+    version="1.3.7"
 )
 
 app.add_middleware(
@@ -624,7 +622,7 @@ app.add_middleware(
 
 @app.get("/", tags=["Health"])
 async def root():
-    return {"service": "Hamo-UME", "version": "1.3.9", "status": "running"}
+    return {"service": "Hamo-UME", "version": "1.3.7", "status": "running"}
 
 # ============================================================
 # PRO (THERAPIST) AUTH ENDPOINTS
@@ -930,8 +928,6 @@ async def create_avatar(avatar_data: AvatarCreate, current_user: UserInDB = Depe
     # Validation is handled by Pydantic model, but add extra checks
     if len(avatar_data.therapeutic_approaches) < 1 or len(avatar_data.therapeutic_approaches) > 3:
         raise HTTPException(status_code=400, detail="therapeutic_approaches must have 1-3 items")
-    if len(avatar_data.specializations) < 1 or len(avatar_data.specializations) > 3:
-        raise HTTPException(status_code=400, detail="specializations must have 1-3 items")
     if len(avatar_data.about) > 280:
         raise HTTPException(status_code=400, detail="about must be max 280 characters")
 
@@ -944,8 +940,7 @@ async def create_avatar(avatar_data: AvatarCreate, current_user: UserInDB = Depe
         therapeutic_approaches=avatar_data.therapeutic_approaches,
         about=avatar_data.about,
         experience_years=avatar_data.experience_years,
-        experience_months=avatar_data.experience_months,
-        specializations=avatar_data.specializations
+        experience_months=avatar_data.experience_months
     )
     avatars_db[avatar_id] = new_avatar
     return AvatarResponse(**new_avatar.model_dump())
