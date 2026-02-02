@@ -1353,6 +1353,71 @@ async def connect_avatar(request: InvitationCodeRequest, current_user: UserInDB 
 
     return ConnectAvatarResponse(avatar=connected_avatar)
 
+class AvatarIdRequest(BaseModel):
+    avatar_id: str
+
+@app.post("/api/client/avatar/connect-by-id", response_model=ConnectAvatarResponse, tags=["Client Avatars"])
+async def connect_avatar_by_id(request: AvatarIdRequest, current_user: UserInDB = Depends(get_current_client)):
+    """Connect to an avatar directly by avatar_id (from Discover page).
+    This also creates an AI Mind for this Avatar + Client pair.
+    """
+    # Check if avatar exists
+    avatar = avatars_db.get(request.avatar_id)
+    if not avatar:
+        raise HTTPException(status_code=404, detail="Avatar not found")
+    if not avatar.is_active:
+        raise HTTPException(status_code=400, detail="Avatar is not active")
+
+    # Check if already connected to this avatar
+    for conn in client_avatar_connections_db.values():
+        if conn.client_id == current_user.id and conn.avatar_id == request.avatar_id and conn.is_active:
+            raise HTTPException(status_code=400, detail="Already connected to this avatar")
+
+    # Create new connection (multi-avatar support)
+    now = datetime.now()
+    connection = create_client_avatar_connection(current_user.id, request.avatar_id)
+
+    # Create AI Mind for this Avatar + Client pair
+    mind_id = str(uuid.uuid4())
+    new_mind = AIMindInDB(
+        id=mind_id,
+        user_id=current_user.id,  # Already connected
+        avatar_id=request.avatar_id,
+        therapist_id=avatar.therapist_id,
+        name=current_user.full_name,  # Use client's name
+        sex=None,
+        age=None,
+        personality=None,
+        emotion_pattern=None,
+        cognition_beliefs=None,
+        relationship_manipulations=None,
+        goals=None,
+        therapy_principles=None,
+        connected_at=now,  # Already connected
+        created_at=now
+    )
+    ai_minds_db[mind_id] = new_mind
+
+    # Update avatar client count
+    avatar.client_count += 1
+
+    # Get therapist info
+    therapist = users_db.get(avatar.therapist_id)
+
+    # Build response
+    connected_avatar = ConnectedAvatarDetail(
+        id=avatar.id,
+        avatar_name=avatar.name,
+        pro_name=therapist.full_name if therapist else "Therapist",
+        specialty=avatar.specialty,
+        therapeutic_approaches=avatar.therapeutic_approaches,
+        about=avatar.about,
+        avatar_picture=None,
+        last_chat_time=connection.last_chat_time
+    )
+
+    return ConnectAvatarResponse(avatar=connected_avatar)
+
 # ============================================================
 # AI MIND ENDPOINTS
 # ============================================================
