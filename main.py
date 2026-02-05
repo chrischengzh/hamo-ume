@@ -1504,7 +1504,7 @@ class SupervisionFeedbackResponse(BaseModel):
     message: str
 
 # In-memory storage for supervision feedback
-supervision_feedback_db: dict[str, list[dict]] = {}  # key: "{user_id}_{avatar_id}" -> list of feedbacks
+supervision_feedback_db: dict[str, list[dict]] = {}  # key: mind_id -> list of feedbacks
 
 class AIMindByUserAvatarResponse(BaseModel):
     """Response for GET /api/mind/{user_id}/{avatar_id}"""
@@ -1556,28 +1556,27 @@ async def get_user_ai_mind(user_id: str, avatar_id: str, current_user: UserInDB 
         avg_time=found_mind.avg_time
     )
 
-@app.post("/api/mind/{user_id}/{avatar_id}/supervise", response_model=SupervisionFeedbackResponse, tags=["AI Mind"])
+@app.post("/api/mind/{mind_id}/supervise", response_model=SupervisionFeedbackResponse, tags=["AI Mind"])
 async def submit_supervision_feedback(
-    user_id: str,
-    avatar_id: str,
+    mind_id: str,
     request: SupervisionFeedbackRequest,
     current_user: UserInDB = Depends(get_current_pro)
 ):
     """Submit supervision feedback for a client's AI Mind profile (Pro only)"""
-    # Verify the user exists
-    user = users_db.get(user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+    # Find the AI Mind by mind_id
+    mind = ai_minds_db.get(mind_id)
+    if not mind:
+        raise HTTPException(status_code=404, detail="AI Mind not found")
 
-    # Verify the avatar exists and belongs to current pro
-    avatar = avatars_db.get(avatar_id)
+    # Verify the avatar belongs to current pro
+    avatar = avatars_db.get(mind.avatar_id)
     if not avatar:
         raise HTTPException(status_code=404, detail="Avatar not found")
     if avatar.therapist_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized to supervise this avatar")
 
-    # Store the feedback
-    cache_key = f"{user_id}_{avatar_id}"
+    # Store the feedback using mind_id as key
+    cache_key = mind_id
     if cache_key not in supervision_feedback_db:
         supervision_feedback_db[cache_key] = []
 
