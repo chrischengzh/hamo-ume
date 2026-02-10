@@ -1507,8 +1507,16 @@ async def connect_avatar(request: InvitationCodeRequest, current_user: UserInDB 
         raise HTTPException(status_code=404, detail="Invalid invitation code")
     if invitation_data.get("is_used", False):
         raise HTTPException(status_code=400, detail="Invitation code already used")
-    if datetime.fromisoformat(invitation_data["expires_at"]) < datetime.now():
-        raise HTTPException(status_code=400, detail="Invitation code expired")
+
+    # Handle datetime parsing safely
+    try:
+        expires_at = invitation_data["expires_at"]
+        if isinstance(expires_at, str):
+            expires_at = datetime.fromisoformat(expires_at)
+        if expires_at < datetime.now():
+            raise HTTPException(status_code=400, detail="Invitation code expired")
+    except (KeyError, ValueError, TypeError) as e:
+        raise HTTPException(status_code=500, detail=f"Invalid invitation data: {str(e)}")
 
     # Check if already connected to this avatar
     connections = db.get_connections_by_client(current_user.id)
