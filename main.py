@@ -65,6 +65,17 @@ class RelationshipStyle(str, Enum):
     AVOIDANT = "avoidant"
     DISORGANIZED = "disorganized"
 
+class PSVSQuadrant(str, Enum):
+    EXPERT = "expert"
+    SUPPORTER = "supporter"
+    LEADER = "leader"
+    DREAMER = "dreamer"
+
+class PSVSEnergyState(str, Enum):
+    POSITIVE = "positive"      # Orange center - homeostatic/balanced
+    NEGATIVE = "negative"      # Gray middle - unstable
+    NEUROTIC = "neurotic"      # Red outer - crisis
+
 # ============================================================
 # PASSWORD UTILITIES
 # ============================================================
@@ -451,6 +462,74 @@ class FeedbackResponse(BaseModel):
     feedback_id: str
 
 # ============================================================
+# PSVS (Psychological Semantic Vector Space) MODELS
+# ============================================================
+
+class PSVSCoordinates(BaseModel):
+    """Represents a position in the PSVS space at a specific time"""
+    quadrant: PSVSQuadrant
+    energy_state: PSVSEnergyState
+    rational_emotional: float = Field(ge=-1.0, le=1.0, description="-1=emotional, +1=rational")
+    intro_extro: float = Field(ge=-1.0, le=1.0, description="-1=introvert, +1=extrovert")
+    distance_from_center: float = Field(ge=0.0, le=1.0, description="0=homeostatic center, 1=neurotic edge")
+    stress_level: float = Field(ge=0.0, le=10.0, description="Internal stress calculation")
+    timestamp: datetime = Field(default_factory=datetime.now)
+
+class PSVSProfile(BaseModel):
+    """PSVS profile for a client's AI Mind - tracks position and movement over time"""
+    id: str
+    mind_id: str
+    current_position: PSVSCoordinates
+    trajectory_history: list[PSVSCoordinates] = Field(default_factory=list, description="Last 50 positions")
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
+
+class ConversationSession(BaseModel):
+    """A conversation session between client and avatar"""
+    id: str
+    mind_id: str
+    avatar_id: str
+    user_id: str
+    started_at: datetime = Field(default_factory=datetime.now)
+    ended_at: Optional[datetime] = None
+    message_count: int = 0
+    is_active: bool = True
+
+class ConversationMessage(BaseModel):
+    """A single message in a conversation with PSVS snapshot"""
+    id: str
+    session_id: str
+    mind_id: str
+    role: str  # "user" or "assistant"
+    content: str
+    psvs_snapshot: Optional[PSVSCoordinates] = None
+    timestamp: datetime = Field(default_factory=datetime.now)
+
+# Response models for PSVS endpoints
+class PSVSProfileResponse(BaseModel):
+    """Response model for PSVS profile"""
+    id: str
+    mind_id: str
+    current_position: PSVSCoordinates
+    recent_trajectory: list[PSVSCoordinates] = Field(default_factory=list, description="Last 10 positions")
+    created_at: datetime
+    updated_at: datetime
+
+class MessageResponse(BaseModel):
+    """Response when sending a message"""
+    message_id: str
+    response: str
+    psvs_position: PSVSCoordinates
+    session_id: str
+
+class SessionStartResponse(BaseModel):
+    """Response when starting a session"""
+    session_id: str
+    mind_id: str
+    avatar_id: str
+    initial_psvs_position: PSVSCoordinates
+
+# ============================================================
 # IN-MEMORY STORAGE
 # ============================================================
 
@@ -464,6 +543,11 @@ mind_cache: dict[str, UserAIMind] = {}  # Legacy cache for mock data
 feedback_storage: list[dict] = []
 pro_refresh_tokens_db: dict[str, str] = {}  # refresh_token -> user_id
 client_refresh_tokens_db: dict[str, str] = {}  # refresh_token -> user_id
+
+# PSVS storage
+psvs_profiles_db: dict[str, PSVSProfile] = {}  # mind_id -> PSVS Profile
+conversation_sessions_db: dict[str, ConversationSession] = {}  # session_id -> Session
+conversation_messages_db: dict[str, ConversationMessage] = {}  # message_id -> Message
 
 # ============================================================
 # JWT UTILITIES
@@ -1090,6 +1174,33 @@ async def create_ai_mind(mind_data: AIMindCreate, current_user: UserInDB = Depen
     )
     ai_minds_db[mind_id] = new_mind
     avatar.client_count += 1
+
+    # Auto-initialize PSVS profile
+    try:
+        from psvs.calculator import calculate_initial_psvs_position
+
+        ai_mind_dict = {
+            "personality": mind_data.personality.model_dump() if mind_data.personality else {},
+            "emotion_pattern": mind_data.emotion_pattern.model_dump() if mind_data.emotion_pattern else {},
+            "cognition_beliefs": mind_data.cognition_beliefs.model_dump() if mind_data.cognition_beliefs else {},
+            "relationship_manipulations": mind_data.relationship_manipulations.model_dump() if mind_data.relationship_manipulations else {},
+        }
+
+        initial_coords = calculate_initial_psvs_position(ai_mind_dict)
+
+        psvs_id = str(uuid.uuid4())
+        psvs_profile = PSVSProfile(
+            id=psvs_id,
+            mind_id=mind_id,
+            current_position=PSVSCoordinates(**initial_coords),
+            trajectory_history=[PSVSCoordinates(**initial_coords)],
+            created_at=datetime.now(),
+            updated_at=datetime.now()
+        )
+        psvs_profiles_db[mind_id] = psvs_profile
+    except Exception as e:
+        # Don't fail AI Mind creation if PSVS initialization fails
+        print(f"Warning: PSVS profile initialization failed: {e}")
 
     return AIMindResponse(
         **new_mind.model_dump(),
@@ -1731,6 +1842,331 @@ async def get_portal_pro_user_details(pro_id: str):
         avatars=user_avatars,
         clients=user_clients
     )
+
+# ============================================================
+# PSVS ENDPOINTS
+# ============================================================
+
+# Import PSVS modules
+from psvs.calculator import (
+    calculate_initial_psvs_position,
+    calculate_psvs_update,
+)
+from psvs.prompt_generator import generate_system_prompt
+from psvs.gemini_service import (
+    generate_response,
+    analyze_message_for_stress,
+    should_skip_psvs_update,
+)
+
+@app.post("/api/mind/{mind_id}/psvs/initialize", response_model=PSVSProfileResponse, tags=["PSVS"])
+async def initialize_psvs_profile(mind_id: str, current_user: UserInDB = Depends(get_current_user)):
+    """
+    Initialize PSVS profile for an AI Mind.
+
+    This is automatically called when creating an AI Mind, but can be called manually if needed.
+    """
+    # Get AI Mind
+    mind = ai_minds_db.get(mind_id)
+    if not mind:
+        raise HTTPException(status_code=404, detail="AI Mind not found")
+
+    # Check if PSVS profile already exists
+    if mind_id in psvs_profiles_db:
+        existing_profile = psvs_profiles_db[mind_id]
+        return PSVSProfileResponse(
+            id=existing_profile.id,
+            mind_id=existing_profile.mind_id,
+            current_position=existing_profile.current_position,
+            recent_trajectory=existing_profile.trajectory_history[-10:],
+            created_at=existing_profile.created_at,
+            updated_at=existing_profile.updated_at
+        )
+
+    # Calculate initial PSVS position from AI Mind data
+    ai_mind_dict = {
+        "personality": mind.personality.model_dump() if mind.personality else {},
+        "emotion_pattern": mind.emotion_pattern.model_dump() if mind.emotion_pattern else {},
+        "cognition_beliefs": mind.cognition_beliefs.model_dump() if mind.cognition_beliefs else {},
+        "relationship_manipulations": mind.relationship_manipulations.model_dump() if mind.relationship_manipulations else {},
+    }
+
+    initial_coords = calculate_initial_psvs_position(ai_mind_dict)
+
+    # Create PSVS profile
+    psvs_id = str(uuid.uuid4())
+    psvs_profile = PSVSProfile(
+        id=psvs_id,
+        mind_id=mind_id,
+        current_position=PSVSCoordinates(**initial_coords),
+        trajectory_history=[PSVSCoordinates(**initial_coords)],
+        created_at=datetime.now(),
+        updated_at=datetime.now()
+    )
+
+    psvs_profiles_db[mind_id] = psvs_profile
+
+    return PSVSProfileResponse(
+        id=psvs_profile.id,
+        mind_id=psvs_profile.mind_id,
+        current_position=psvs_profile.current_position,
+        recent_trajectory=psvs_profile.trajectory_history[-10:],
+        created_at=psvs_profile.created_at,
+        updated_at=psvs_profile.updated_at
+    )
+
+
+@app.get("/api/mind/{mind_id}/psvs", response_model=PSVSProfileResponse, tags=["PSVS"])
+async def get_psvs_profile(mind_id: str, current_user: UserInDB = Depends(get_current_user)):
+    """Get current PSVS profile for an AI Mind."""
+    psvs_profile = psvs_profiles_db.get(mind_id)
+    if not psvs_profile:
+        raise HTTPException(status_code=404, detail="PSVS profile not found. Initialize it first.")
+
+    return PSVSProfileResponse(
+        id=psvs_profile.id,
+        mind_id=psvs_profile.mind_id,
+        current_position=psvs_profile.current_position,
+        recent_trajectory=psvs_profile.trajectory_history[-10:],
+        created_at=psvs_profile.created_at,
+        updated_at=psvs_profile.updated_at
+    )
+
+
+@app.get("/api/mind/{mind_id}/psvs/trajectory", response_model=list[PSVSCoordinates], tags=["PSVS"])
+async def get_psvs_trajectory(mind_id: str, current_user: UserInDB = Depends(get_current_user)):
+    """Get full PSVS trajectory history for an AI Mind."""
+    psvs_profile = psvs_profiles_db.get(mind_id)
+    if not psvs_profile:
+        raise HTTPException(status_code=404, detail="PSVS profile not found")
+
+    return psvs_profile.trajectory_history
+
+
+@app.post("/api/session/start", response_model=SessionStartResponse, tags=["PSVS"])
+async def start_conversation_session(
+    mind_id: str,
+    avatar_id: str,
+    current_user: UserInDB = Depends(get_current_user)
+):
+    """Start a new conversation session."""
+    # Verify AI Mind exists
+    mind = ai_minds_db.get(mind_id)
+    if not mind:
+        raise HTTPException(status_code=404, detail="AI Mind not found")
+
+    # Verify avatar exists
+    avatar = avatars_db.get(avatar_id)
+    if not avatar:
+        raise HTTPException(status_code=404, detail="Avatar not found")
+
+    # Get or create PSVS profile
+    psvs_profile = psvs_profiles_db.get(mind_id)
+    if not psvs_profile:
+        # Auto-initialize PSVS profile
+        ai_mind_dict = {
+            "personality": mind.personality.model_dump() if mind.personality else {},
+            "emotion_pattern": mind.emotion_pattern.model_dump() if mind.emotion_pattern else {},
+            "cognition_beliefs": mind.cognition_beliefs.model_dump() if mind.cognition_beliefs else {},
+            "relationship_manipulations": mind.relationship_manipulations.model_dump() if mind.relationship_manipulations else {},
+        }
+        initial_coords = calculate_initial_psvs_position(ai_mind_dict)
+        psvs_id = str(uuid.uuid4())
+        psvs_profile = PSVSProfile(
+            id=psvs_id,
+            mind_id=mind_id,
+            current_position=PSVSCoordinates(**initial_coords),
+            trajectory_history=[PSVSCoordinates(**initial_coords)],
+            created_at=datetime.now(),
+            updated_at=datetime.now()
+        )
+        psvs_profiles_db[mind_id] = psvs_profile
+
+    # Create session
+    session_id = str(uuid.uuid4())
+    session = ConversationSession(
+        id=session_id,
+        mind_id=mind_id,
+        avatar_id=avatar_id,
+        user_id=current_user.id,
+        started_at=datetime.now(),
+        message_count=0,
+        is_active=True
+    )
+
+    conversation_sessions_db[session_id] = session
+
+    return SessionStartResponse(
+        session_id=session_id,
+        mind_id=mind_id,
+        avatar_id=avatar_id,
+        initial_psvs_position=psvs_profile.current_position
+    )
+
+
+@app.post("/api/session/{session_id}/message", response_model=MessageResponse, tags=["PSVS"])
+async def send_message(
+    session_id: str,
+    message: str,
+    current_user: UserInDB = Depends(get_current_user)
+):
+    """
+    Send a message and get AI response (MAIN CONVERSATION ENDPOINT).
+
+    Flow:
+    1. Analyze user message for PSVS indicators
+    2. Update PSVS position (if message is substantial)
+    3. Generate dynamic prompts (policy/value/search)
+    4. Call Gemini API
+    5. Store message + response
+    6. Update trajectory
+    7. Return response + PSVS position
+    """
+    # Get session
+    session = conversation_sessions_db.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if not session.is_active:
+        raise HTTPException(status_code=400, detail="Session has ended")
+
+    # Get AI Mind and Avatar
+    mind = ai_minds_db.get(session.mind_id)
+    avatar = avatars_db.get(session.avatar_id)
+
+    if not mind or not avatar:
+        raise HTTPException(status_code=404, detail="Mind or Avatar not found")
+
+    # Get PSVS profile
+    psvs_profile = psvs_profiles_db.get(session.mind_id)
+    if not psvs_profile:
+        raise HTTPException(status_code=404, detail="PSVS profile not found")
+
+    # Check if we should skip PSVS update for very short messages
+    skip_update = should_skip_psvs_update(message)
+
+    # Analyze message for stress indicators (if not skipping)
+    if not skip_update:
+        stress_indicators = analyze_message_for_stress(message)
+
+        # Update PSVS position
+        current_position_dict = psvs_profile.current_position.model_dump()
+        updated_coords = calculate_psvs_update(
+            current_position_dict,
+            stress_indicators,
+            message
+        )
+
+        # Update profile
+        new_position = PSVSCoordinates(**updated_coords)
+        psvs_profile.current_position = new_position
+
+        # Add to trajectory (keep last 50)
+        psvs_profile.trajectory_history.append(new_position)
+        if len(psvs_profile.trajectory_history) > 50:
+            psvs_profile.trajectory_history = psvs_profile.trajectory_history[-50:]
+
+        psvs_profile.updated_at = datetime.now()
+
+    # Generate system prompt with current PSVS position
+    avatar_dict = {
+        "name": avatar.name,
+        "specialty": avatar.specialty,
+        "therapeutic_approaches": avatar.therapeutic_approaches,
+        "about": avatar.about,
+    }
+
+    ai_mind_dict = {
+        "name": mind.name,
+        "goals": mind.goals,
+        "therapy_principles": mind.therapy_principles,
+    }
+
+    psvs_position_dict = psvs_profile.current_position.model_dump()
+
+    system_prompt = generate_system_prompt(avatar_dict, ai_mind_dict, psvs_position_dict)
+
+    # Get conversation history
+    conversation_history = []
+    for msg_id, msg in conversation_messages_db.items():
+        if msg.session_id == session_id:
+            conversation_history.append({
+                "role": msg.role,
+                "content": msg.content
+            })
+
+    # Sort by timestamp
+    conversation_history.sort(key=lambda x: conversation_messages_db[
+        next(k for k, v in conversation_messages_db.items() if v.content == x["content"])
+    ].timestamp)
+
+    # Generate response using Gemini
+    response_text = generate_response(system_prompt, message, conversation_history)
+
+    # Store user message
+    user_msg_id = str(uuid.uuid4())
+    user_message = ConversationMessage(
+        id=user_msg_id,
+        session_id=session_id,
+        mind_id=session.mind_id,
+        role="user",
+        content=message,
+        psvs_snapshot=psvs_profile.current_position,
+        timestamp=datetime.now()
+    )
+    conversation_messages_db[user_msg_id] = user_message
+
+    # Store assistant response
+    assistant_msg_id = str(uuid.uuid4())
+    assistant_message = ConversationMessage(
+        id=assistant_msg_id,
+        session_id=session_id,
+        mind_id=session.mind_id,
+        role="assistant",
+        content=response_text,
+        psvs_snapshot=psvs_profile.current_position,
+        timestamp=datetime.now()
+    )
+    conversation_messages_db[assistant_msg_id] = assistant_message
+
+    # Update session
+    session.message_count += 2
+
+    return MessageResponse(
+        message_id=assistant_msg_id,
+        response=response_text,
+        psvs_position=psvs_profile.current_position,
+        session_id=session_id
+    )
+
+
+@app.get("/api/session/{session_id}/messages", response_model=list[ConversationMessage], tags=["PSVS"])
+async def get_session_messages(session_id: str, current_user: UserInDB = Depends(get_current_user)):
+    """Get all messages in a conversation session."""
+    session = conversation_sessions_db.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Get all messages for this session
+    messages = [msg for msg in conversation_messages_db.values() if msg.session_id == session_id]
+
+    # Sort by timestamp
+    messages.sort(key=lambda x: x.timestamp)
+
+    return messages
+
+
+@app.post("/api/session/{session_id}/end", tags=["PSVS"])
+async def end_conversation_session(session_id: str, current_user: UserInDB = Depends(get_current_user)):
+    """End a conversation session."""
+    session = conversation_sessions_db.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    session.is_active = False
+    session.ended_at = datetime.now()
+
+    return {"success": True, "message": "Session ended", "session_id": session_id}
 
 # For Vercel deployment
 app = app
