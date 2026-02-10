@@ -743,9 +743,10 @@ app.add_middleware(
         "https://hamo-pro.vercel.app",     # Vercel 生产环境 - Pro
         "https://hamo-client.vercel.app",  # Vercel 生产环境 - Client
         "https://hamo-portal.vercel.app",  # Vercel 生产环境 - Portal
-        "https://*.vercel.app",            # 所有 Vercel 部署
+        "https://app.vercel.app",          # Vercel app deployment
         "https://hamo.ai",                 # 主域名
-        "https://*.hamo.ai",               # 子域名
+        "https://www.hamo.ai",             # www subdomain
+        "https://api.hamo.ai",             # API subdomain
     ],
     allow_credentials=True,
     allow_methods=["*"],
