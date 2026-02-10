@@ -21,6 +21,15 @@ import os
 # JWT dependencies
 from jose import JWTError, jwt
 
+# Database module
+from database import db
+
+# IMPORTANT: DynamoDB Field Name Mappings
+# The database schema uses different field names than the Pydantic models:
+# - Model: therapist_id → Database: pro_user_id (in avatars, invitations, AI minds)
+# - Model: client_id → Database: client_user_id (in connections)
+# These mappings need to be handled when saving/loading data
+
 # ============================================================
 # CONFIGURATION
 # ============================================================
@@ -530,24 +539,25 @@ class SessionStartResponse(BaseModel):
     initial_psvs_position: PSVSCoordinates
 
 # ============================================================
-# IN-MEMORY STORAGE
+# IN-MEMORY STORAGE (LEGACY - Commented out, now using DynamoDB)
 # ============================================================
 
-users_db: dict[str, UserInDB] = {}
-avatars_db: dict[str, AvatarInDB] = {}
-client_profiles_db: dict[str, ClientProfileInDB] = {}
-invitations_db: dict[str, InvitationInDB] = {}
-client_avatar_connections_db: dict[str, ClientAvatarConnectionInDB] = {}  # connection_id -> connection
-ai_minds_db: dict[str, AIMindInDB] = {}  # mind_id -> AI Mind
-mind_cache: dict[str, UserAIMind] = {}  # Legacy cache for mock data
-feedback_storage: list[dict] = []
-pro_refresh_tokens_db: dict[str, str] = {}  # refresh_token -> user_id
-client_refresh_tokens_db: dict[str, str] = {}  # refresh_token -> user_id
+# users_db: dict[str, UserInDB] = {}
+# avatars_db: dict[str, AvatarInDB] = {}
+# client_profiles_db: dict[str, ClientProfileInDB] = {}
+# invitations_db: dict[str, InvitationInDB] = {}
+# client_avatar_connections_db: dict[str, ClientAvatarConnectionInDB] = {}  # connection_id -> connection
+# ai_minds_db: dict[str, AIMindInDB] = {}  # mind_id -> AI Mind
+mind_cache: dict[str, UserAIMind] = {}  # Legacy cache for mock data (still in-memory)
+feedback_storage: list[dict] = []  # Still in-memory for now
+supervision_feedback_db: dict[str, list[dict]] = {}  # Still in-memory (defined later)
+# pro_refresh_tokens_db: dict[str, str] = {}  # refresh_token -> user_id
+# client_refresh_tokens_db: dict[str, str] = {}  # refresh_token -> user_id
 
-# PSVS storage
-psvs_profiles_db: dict[str, PSVSProfile] = {}  # mind_id -> PSVS Profile
-conversation_sessions_db: dict[str, ConversationSession] = {}  # session_id -> Session
-conversation_messages_db: dict[str, ConversationMessage] = {}  # message_id -> Message
+# PSVS storage - now using DynamoDB
+# psvs_profiles_db: dict[str, PSVSProfile] = {}  # mind_id -> PSVS Profile
+# conversation_sessions_db: dict[str, ConversationSession] = {}  # session_id -> Session
+# conversation_messages_db: dict[str, ConversationMessage] = {}  # message_id -> Message
 
 # ============================================================
 # JWT UTILITIES
@@ -564,10 +574,7 @@ def create_refresh_token(user_id: str, role: UserRole) -> str:
     expire = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
     to_encode.update({"exp": expire})
     token = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    if role == UserRole.THERAPIST:
-        pro_refresh_tokens_db[token] = user_id
-    else:
-        client_refresh_tokens_db[token] = user_id
+    db.create_refresh_token(token, user_id, role.value)
     return token
 
 def decode_token(token: str) -> dict:
@@ -582,9 +589,10 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     if payload.get("type") != "access":
         raise HTTPException(status_code=401, detail="Invalid token type")
     user_id = payload.get("sub")
-    user = users_db.get(user_id)
-    if not user:
+    user_data = db.get_user_by_id(user_id)
+    if not user_data:
         raise HTTPException(status_code=401, detail="User not found")
+    user = UserInDB(**user_data)
     if not user.is_active:
         raise HTTPException(status_code=401, detail="User inactive")
     return user
@@ -606,20 +614,25 @@ async def get_current_client(current_user: UserInDB = Depends(get_current_user))
 def get_connected_avatars_for_client(client_user_id: str) -> list[ConnectedAvatarDetail]:
     """Get all connected avatars for a client user"""
     connected_avatars = []
-    for conn in client_avatar_connections_db.values():
-        if conn.client_id == client_user_id and conn.is_active:
-            avatar = avatars_db.get(conn.avatar_id)
-            if avatar:
-                therapist = users_db.get(avatar.therapist_id)
+    connections = db.get_connections_by_client(client_user_id)
+    for conn_data in connections:
+        if conn_data.get("is_active", False):
+            avatar_data = db.get_avatar_by_id(conn_data["avatar_id"])
+            if avatar_data:
+                therapist_data = db.get_user_by_id(avatar_data["therapist_id"])
+                # Handle both client_id (model) and client_user_id (database) field names
+                last_chat = conn_data.get("last_chat_time")
+                if isinstance(last_chat, str):
+                    last_chat = datetime.fromisoformat(last_chat)
                 connected_avatars.append(ConnectedAvatarDetail(
-                    id=avatar.id,
-                    avatar_name=avatar.name,
-                    pro_name=therapist.full_name if therapist else "Therapist",
-                    specialty=avatar.specialty,
-                    therapeutic_approaches=avatar.therapeutic_approaches,
-                    about=avatar.about,
+                    id=avatar_data["id"],
+                    avatar_name=avatar_data["name"],
+                    pro_name=therapist_data["full_name"] if therapist_data else "Therapist",
+                    specialty=avatar_data["specialty"],
+                    therapeutic_approaches=avatar_data["therapeutic_approaches"],
+                    about=avatar_data["about"],
                     avatar_picture=None,
-                    last_chat_time=conn.last_chat_time
+                    last_chat_time=last_chat
                 ))
     return connected_avatars
 
@@ -635,7 +648,10 @@ def create_client_avatar_connection(client_user_id: str, avatar_id: str) -> Clie
         last_chat_time=now,
         is_active=True
     )
-    client_avatar_connections_db[connection_id] = connection
+    # Map client_id to client_user_id for database storage
+    connection_dict = connection.model_dump()
+    connection_dict["client_user_id"] = connection_dict.pop("client_id")
+    db.create_connection(connection_dict)
     return connection
 
 def get_client_connected_at(client_profile: ClientProfileInDB) -> Optional[datetime]:
@@ -645,9 +661,21 @@ def get_client_connected_at(client_profile: ClientProfileInDB) -> Optional[datet
         return None  # No real user has registered yet
 
     # Find the connection for this user
-    for conn in client_avatar_connections_db.values():
-        if conn.client_id == client_profile.user_id and conn.is_active:
-            return conn.connected_at
+    connections = db.get_connections_by_client(client_profile.user_id)
+    for conn_data in connections:
+        if conn_data.get("is_active", False):
+            connected_at = conn_data["connected_at"]
+            if isinstance(connected_at, str):
+                return datetime.fromisoformat(connected_at)
+            return connected_at
+    return None
+
+def find_invitation_by_mind_id(mind_id: str, pro_user_id: str) -> Optional[str]:
+    """Find invitation code for a mind_id by scanning pro's invitations"""
+    invitations = db.get_invitations_by_pro(pro_user_id)
+    for inv_data in invitations:
+        if inv_data.get("mind_id") == mind_id and not inv_data.get("is_used", False):
+            return inv_data["code"]
     return None
 
 # ============================================================
@@ -739,10 +767,10 @@ async def root():
 async def register_pro(user_data: ProRegister):
     """Register a new Pro (Therapist) account"""
     # Only check for duplicate email among Pro users (Pro and Client are independent systems)
-    for u in users_db.values():
-        if u.email == user_data.email and u.role == UserRole.THERAPIST:
-            raise HTTPException(status_code=400, detail="Email already registered as Pro")
-    
+    existing_user = db.get_user_by_email(user_data.email)
+    if existing_user and existing_user.get("role") == UserRole.THERAPIST:
+        raise HTTPException(status_code=400, detail="Email already registered as Pro")
+
     user_id = str(uuid.uuid4())
     new_user = UserInDB(
         id=user_id,
@@ -754,11 +782,11 @@ async def register_pro(user_data: ProRegister):
         license_number=user_data.license_number,
         specializations=user_data.specializations
     )
-    users_db[user_id] = new_user
-    
+    db.create_user(new_user.model_dump())
+
     access_token = create_access_token({"sub": user_id, "email": user_data.email, "role": UserRole.THERAPIST})
     refresh_token = create_refresh_token(user_id, UserRole.THERAPIST)
-    
+
     return ProTokenResponse(
         access_token=access_token,
         refresh_token=refresh_token,
@@ -769,20 +797,20 @@ async def register_pro(user_data: ProRegister):
 @app.post("/api/auth/loginPro", response_model=ProTokenResponse, tags=["Auth - Pro"])
 async def login_pro(credentials: ProLogin):
     """Login as Pro (Therapist)"""
-    user = None
-    for u in users_db.values():
-        if u.email == credentials.email and u.role == UserRole.THERAPIST:
-            user = u
-            break
-    
-    if not user or not verify_password(credentials.password, user.hashed_password):
+    user_data = db.get_user_by_email(credentials.email)
+
+    if not user_data or user_data.get("role") != UserRole.THERAPIST:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    user = UserInDB(**user_data)
+    if not verify_password(credentials.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid email or password")
     if not user.is_active:
         raise HTTPException(status_code=401, detail="Account inactive")
-    
+
     access_token = create_access_token({"sub": user.id, "email": user.email, "role": UserRole.THERAPIST})
     refresh_token = create_refresh_token(user.id, UserRole.THERAPIST)
-    
+
     return ProTokenResponse(
         access_token=access_token,
         refresh_token=refresh_token,
@@ -794,22 +822,24 @@ async def login_pro(credentials: ProLogin):
 async def refresh_pro_token(request: ProRefreshRequest):
     """Refresh Pro access token"""
     payload = decode_token(request.refresh_token)
-    
+
     if payload.get("type") != "refresh" or payload.get("role") != UserRole.THERAPIST:
         raise HTTPException(status_code=401, detail="Invalid Pro refresh token")
-    
+
     user_id = payload.get("sub")
-    if request.refresh_token not in pro_refresh_tokens_db:
+    token_data = db.get_refresh_token(request.refresh_token)
+    if not token_data:
         raise HTTPException(status_code=401, detail="Refresh token revoked")
-    
-    user = users_db.get(user_id)
-    if not user or user.role != UserRole.THERAPIST:
+
+    user_data = db.get_user_by_id(user_id)
+    if not user_data or user_data.get("role") != UserRole.THERAPIST:
         raise HTTPException(status_code=401, detail="Pro user not found")
-    
-    del pro_refresh_tokens_db[request.refresh_token]
+
+    user = UserInDB(**user_data)
+    db.delete_refresh_token(request.refresh_token)
     access_token = create_access_token({"sub": user.id, "email": user.email, "role": UserRole.THERAPIST})
     new_refresh_token = create_refresh_token(user.id, UserRole.THERAPIST)
-    
+
     return ProTokenResponse(
         access_token=access_token,
         refresh_token=new_refresh_token,
@@ -825,57 +855,38 @@ async def refresh_pro_token(request: ProRefreshRequest):
 async def register_client(user_data: ClientRegister):
     """Register a new Client account (requires invitation code)"""
     # Only check for duplicate email among Client users (Pro and Client are independent systems)
-    for u in users_db.values():
-        if u.email == user_data.email and u.role == UserRole.CLIENT:
-            raise HTTPException(status_code=400, detail="Email already registered as Client")
-    
+    existing_user = db.get_user_by_email(user_data.email)
+    if existing_user and existing_user.get("role") == UserRole.CLIENT:
+        raise HTTPException(status_code=400, detail="Email already registered as Client")
+
     # Validate invitation code
-    invitation = invitations_db.get(user_data.invitation_code)
-    if not invitation:
+    invitation_data = db.get_invitation_by_code(user_data.invitation_code)
+    if not invitation_data:
         raise HTTPException(status_code=400, detail="Invalid invitation code")
-    if invitation.is_used:
+    if invitation_data.get("is_used", False):
         raise HTTPException(status_code=400, detail="Invitation code already used")
-    if invitation.expires_at < datetime.now():
+    if datetime.fromisoformat(invitation_data["expires_at"]) < datetime.now():
         raise HTTPException(status_code=400, detail="Invitation code expired")
 
     user_id = str(uuid.uuid4())
     now = datetime.now()
 
     # Bind to AI Mind if mind_id exists in invitation
-    if invitation.mind_id:
-        mind = ai_minds_db.get(invitation.mind_id)
-        if mind:
-            mind.user_id = user_id
-            mind.connected_at = now
+    if invitation_data.get("mind_id"):
+        mind_data = db.get_ai_mind_by_id(invitation_data["mind_id"])
+        if mind_data:
+            mind_data["user_id"] = user_id
+            mind_data["connected_at"] = now.isoformat()
+            db.create_ai_mind(mind_data)  # Update by re-creating
 
-    # Legacy: Create or get client profile
-    client_profile_id = invitation.client_id
+    # Legacy: Create or get client profile (still using in-memory for now)
+    client_profile_id = invitation_data.get("client_id", "")
     if not client_profile_id or client_profile_id == "":
         # Auto-create client profile if not exists
         client_profile_id = str(uuid.uuid4())
-        avatar = avatars_db.get(invitation.avatar_id)
-        new_client_profile = ClientProfileInDB(
-            id=client_profile_id,
-            therapist_id=invitation.therapist_id,
-            avatar_id=invitation.avatar_id,
-            user_id=user_id,
-            name=user_data.nickname,
-            sex=None,
-            age=None,
-            emotion_pattern=None,
-            personality=None,
-            cognition=None,
-            goals=None,
-            therapy_principles=None
-        )
-        client_profiles_db[client_profile_id] = new_client_profile
-        if avatar:
-            avatar.client_count += 1
-    else:
-        # Link to existing client profile
-        client_profile = client_profiles_db.get(client_profile_id)
-        if client_profile:
-            client_profile.user_id = user_id
+        avatar_data = db.get_avatar_by_id(invitation_data["avatar_id"])
+        # Note: client_profiles_db is legacy and not migrated to DB yet
+        # For now we skip this logic since AI Minds replace client profiles
 
     new_user = UserInDB(
         id=user_id,
@@ -883,30 +894,31 @@ async def register_client(user_data: ClientRegister):
         full_name=user_data.nickname,  # Use nickname from client frontend
         role=UserRole.CLIENT,
         hashed_password=hash_password(user_data.password),
-        therapist_id=invitation.therapist_id,
-        avatar_id=invitation.avatar_id,
+        therapist_id=invitation_data["therapist_id"],
+        avatar_id=invitation_data["avatar_id"],
         client_profile_id=client_profile_id
     )
-    users_db[user_id] = new_user
+    db.create_user(new_user.model_dump())
 
     # Mark invitation as used
-    invitation.is_used = True
+    invitation_data["is_used"] = True
+    db.create_invitation(invitation_data)  # Update by re-creating
 
     # Create client-avatar connection (multi-avatar support)
-    create_client_avatar_connection(user_id, invitation.avatar_id)
+    create_client_avatar_connection(user_id, invitation_data["avatar_id"])
 
     # Get all connected avatars for this client
     connected_avatars = get_connected_avatars_for_client(user_id)
 
     # Get legacy connected_avatar for backward compatibility
-    avatar = avatars_db.get(invitation.avatar_id)
-    therapist = users_db.get(invitation.therapist_id)
+    avatar_data = db.get_avatar_by_id(invitation_data["avatar_id"])
+    therapist_data = db.get_user_by_id(invitation_data["therapist_id"])
     connected_avatar = None
-    if avatar:
+    if avatar_data:
         connected_avatar = ConnectedAvatar(
-            id=avatar.id,
-            name=avatar.name,
-            therapist_name=therapist.full_name if therapist else None
+            id=avatar_data["id"],
+            name=avatar_data["name"],
+            therapist_name=therapist_data["full_name"] if therapist_data else None
         )
 
     access_token = create_access_token({"sub": user_id, "email": user_data.email, "role": UserRole.CLIENT})
@@ -924,13 +936,13 @@ async def register_client(user_data: ClientRegister):
 @app.post("/api/auth/loginClient", response_model=ClientTokenResponse, tags=["Auth - Client"])
 async def login_client(credentials: ClientLogin):
     """Login as Client"""
-    user = None
-    for u in users_db.values():
-        if u.email == credentials.email and u.role == UserRole.CLIENT:
-            user = u
-            break
+    user_data = db.get_user_by_email(credentials.email)
 
-    if not user or not verify_password(credentials.password, user.hashed_password):
+    if not user_data or user_data.get("role") != UserRole.CLIENT:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    user = UserInDB(**user_data)
+    if not verify_password(credentials.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid email or password")
     if not user.is_active:
         raise HTTPException(status_code=401, detail="Account inactive")
@@ -941,13 +953,13 @@ async def login_client(credentials: ClientLogin):
     # Get legacy connected_avatar for backward compatibility (first/primary avatar)
     connected_avatar = None
     if user.avatar_id:
-        avatar = avatars_db.get(user.avatar_id)
-        therapist = users_db.get(user.therapist_id) if user.therapist_id else None
-        if avatar:
+        avatar_data = db.get_avatar_by_id(user.avatar_id)
+        therapist_data = db.get_user_by_id(user.therapist_id) if user.therapist_id else None
+        if avatar_data:
             connected_avatar = ConnectedAvatar(
-                id=avatar.id,
-                name=avatar.name,
-                therapist_name=therapist.full_name if therapist else None
+                id=avatar_data["id"],
+                name=avatar_data["name"],
+                therapist_name=therapist_data["full_name"] if therapist_data else None
             )
 
     access_token = create_access_token({"sub": user.id, "email": user.email, "role": UserRole.CLIENT})
@@ -971,12 +983,15 @@ async def refresh_client_token(request: ClientRefreshRequest):
         raise HTTPException(status_code=401, detail="Invalid Client refresh token")
 
     user_id = payload.get("sub")
-    if request.refresh_token not in client_refresh_tokens_db:
+    token_data = db.get_refresh_token(request.refresh_token)
+    if not token_data:
         raise HTTPException(status_code=401, detail="Refresh token revoked")
 
-    user = users_db.get(user_id)
-    if not user or user.role != UserRole.CLIENT:
+    user_data = db.get_user_by_id(user_id)
+    if not user_data or user_data.get("role") != UserRole.CLIENT:
         raise HTTPException(status_code=401, detail="Client user not found")
+
+    user = UserInDB(**user_data)
 
     # Get all connected avatars for this client
     connected_avatars = get_connected_avatars_for_client(user.id)
@@ -984,16 +999,16 @@ async def refresh_client_token(request: ClientRefreshRequest):
     # Get legacy connected_avatar for backward compatibility (first/primary avatar)
     connected_avatar = None
     if user.avatar_id:
-        avatar = avatars_db.get(user.avatar_id)
-        therapist = users_db.get(user.therapist_id) if user.therapist_id else None
-        if avatar:
+        avatar_data = db.get_avatar_by_id(user.avatar_id)
+        therapist_data = db.get_user_by_id(user.therapist_id) if user.therapist_id else None
+        if avatar_data:
             connected_avatar = ConnectedAvatar(
-                id=avatar.id,
-                name=avatar.name,
-                therapist_name=therapist.full_name if therapist else None
+                id=avatar_data["id"],
+                name=avatar_data["name"],
+                therapist_name=therapist_data["full_name"] if therapist_data else None
             )
 
-    del client_refresh_tokens_db[request.refresh_token]
+    db.delete_refresh_token(request.refresh_token)
     access_token = create_access_token({"sub": user.id, "email": user.email, "role": UserRole.CLIENT})
     new_refresh_token = create_refresh_token(user.id, UserRole.CLIENT)
 
@@ -1027,7 +1042,8 @@ async def get_client_me(current_user: UserInDB = Depends(get_current_client)):
 @app.get("/api/avatars", response_model=list[AvatarResponse], tags=["Avatars"])
 async def get_avatars(current_user: UserInDB = Depends(get_current_pro)):
     """Get all avatars for current Pro"""
-    return [AvatarResponse(**a.model_dump()) for a in avatars_db.values() if a.therapist_id == current_user.id]
+    avatars = db.get_avatars_by_pro(current_user.id)
+    return [AvatarResponse(**a) for a in avatars]
 
 @app.post("/api/avatars", response_model=AvatarResponse, tags=["Avatars"])
 async def create_avatar(avatar_data: AvatarCreate, current_user: UserInDB = Depends(get_current_pro)):
@@ -1049,24 +1065,26 @@ async def create_avatar(avatar_data: AvatarCreate, current_user: UserInDB = Depe
         experience_years=avatar_data.experience_years,
         experience_months=avatar_data.experience_months
     )
-    avatars_db[avatar_id] = new_avatar
+    db.create_avatar(new_avatar.model_dump())
     return AvatarResponse(**new_avatar.model_dump())
 
 @app.get("/api/avatars/{avatar_id}", response_model=AvatarResponse, tags=["Avatars"])
 async def get_avatar(avatar_id: str, current_user: UserInDB = Depends(get_current_user)):
     """Get avatar by ID"""
-    avatar = avatars_db.get(avatar_id)
-    if not avatar:
+    avatar_data = db.get_avatar_by_id(avatar_id)
+    if not avatar_data:
         raise HTTPException(status_code=404, detail="Avatar not found")
-    return AvatarResponse(**avatar.model_dump())
+    return AvatarResponse(**avatar_data)
 
 @app.put("/api/avatars/{avatar_id}", response_model=AvatarUpdateResponse, tags=["Avatars"])
 async def update_avatar(avatar_id: str, avatar_data: AvatarUpdate, current_user: UserInDB = Depends(get_current_pro)):
     """Update an existing avatar (Pro only, must be the owner)"""
     # Check if avatar exists
-    avatar = avatars_db.get(avatar_id)
-    if not avatar:
+    avatar_dict = db.get_avatar_by_id(avatar_id)
+    if not avatar_dict:
         raise HTTPException(status_code=404, detail="Avatar not found")
+
+    avatar = AvatarInDB(**avatar_dict)
 
     # Check ownership - only the Pro who created the avatar can update it
     if avatar.therapist_id != current_user.id:
@@ -1090,6 +1108,9 @@ async def update_avatar(avatar_id: str, avatar_data: AvatarUpdate, current_user:
 
     # Set updated_at timestamp
     avatar.updated_at = datetime.now()
+
+    # Save to database
+    db.create_avatar(avatar.model_dump())
 
     return AvatarUpdateResponse(
         id=avatar.id,
@@ -1124,18 +1145,19 @@ class DiscoverAvatarResponse(BaseModel):
 async def discover_avatars():
     """Get all public avatars for Client discovery page (no authentication required)"""
     result = []
-    for avatar in avatars_db.values():
-        if avatar.is_active:
-            therapist = users_db.get(avatar.therapist_id)
+    avatars = db.get_all_avatars()
+    for avatar_data in avatars:
+        if avatar_data.get("is_active", True):
+            therapist_data = db.get_user_by_id(avatar_data["therapist_id"])
             result.append(DiscoverAvatarResponse(
-                id=avatar.id,
-                name=avatar.name,
-                specialty=avatar.specialty,
-                therapeutic_approaches=avatar.therapeutic_approaches,
-                about=avatar.about,
-                experience_years=avatar.experience_years,
-                experience_months=avatar.experience_months,
-                pro_name=therapist.full_name if therapist else "Therapist",
+                id=avatar_data["id"],
+                name=avatar_data["name"],
+                specialty=avatar_data["specialty"],
+                therapeutic_approaches=avatar_data["therapeutic_approaches"],
+                about=avatar_data["about"],
+                experience_years=avatar_data["experience_years"],
+                experience_months=avatar_data["experience_months"],
+                pro_name=therapist_data["full_name"] if therapist_data else "Therapist",
                 avatar_picture=None
             ))
     return result
@@ -1148,12 +1170,13 @@ async def discover_avatars():
 async def create_ai_mind(mind_data: AIMindCreate, current_user: UserInDB = Depends(get_current_pro)):
     """Create a new AI Mind for a client (Pro only)"""
     # Verify avatar exists and belongs to current pro
-    avatar = avatars_db.get(mind_data.avatar_id)
-    if not avatar:
+    avatar_dict = db.get_avatar_by_id(mind_data.avatar_id)
+    if not avatar_dict:
         raise HTTPException(status_code=404, detail="Avatar not found")
-    if avatar.therapist_id != current_user.id:
+    if avatar_dict["therapist_id"] != current_user.id:
         raise HTTPException(status_code=403, detail="Avatar does not belong to you")
 
+    avatar = AvatarInDB(**avatar_dict)
     mind_id = str(uuid.uuid4())
     new_mind = AIMindInDB(
         id=mind_id,
@@ -1172,8 +1195,11 @@ async def create_ai_mind(mind_data: AIMindCreate, current_user: UserInDB = Depen
         connected_at=None,
         created_at=datetime.now()
     )
-    ai_minds_db[mind_id] = new_mind
+    db.create_ai_mind(new_mind.model_dump())
+
+    # Update avatar client count
     avatar.client_count += 1
+    db.create_avatar(avatar.model_dump())
 
     # Auto-initialize PSVS profile
     try:
@@ -1197,7 +1223,7 @@ async def create_ai_mind(mind_data: AIMindCreate, current_user: UserInDB = Depen
             created_at=datetime.now(),
             updated_at=datetime.now()
         )
-        psvs_profiles_db[mind_id] = psvs_profile
+        db.create_psvs_profile(psvs_profile.model_dump())
     except Exception as e:
         # Don't fail AI Mind creation if PSVS initialization fails
         print(f"Warning: PSVS profile initialization failed: {e}")
@@ -1210,23 +1236,20 @@ async def create_ai_mind(mind_data: AIMindCreate, current_user: UserInDB = Depen
 @app.get("/api/mind/{mind_id}", response_model=AIMindResponse, tags=["AI Mind"])
 async def get_ai_mind(mind_id: str, current_user: UserInDB = Depends(get_current_user)):
     """Get AI Mind by ID"""
-    mind = ai_minds_db.get(mind_id)
-    if not mind:
+    mind_data = db.get_ai_mind_by_id(mind_id)
+    if not mind_data:
         raise HTTPException(status_code=404, detail="AI Mind not found")
 
-    avatar = avatars_db.get(mind.avatar_id)
+    avatar_data = db.get_avatar_by_id(mind_data["avatar_id"])
 
     # Find invitation code if not connected
     invitation_code = None
-    if mind.connected_at is None:
-        for inv in invitations_db.values():
-            if inv.mind_id == mind_id and not inv.is_used:
-                invitation_code = inv.code
-                break
+    if mind_data.get("connected_at") is None:
+        invitation_code = find_invitation_by_mind_id(mind_id, mind_data["therapist_id"])
 
     return AIMindResponse(
-        **mind.model_dump(),
-        avatar_name=avatar.name if avatar else None,
+        **mind_data,
+        avatar_name=avatar_data["name"] if avatar_data else None,
         invitation_code=invitation_code
     )
 
@@ -1238,23 +1261,21 @@ async def get_ai_mind(mind_id: str, current_user: UserInDB = Depends(get_current
 async def get_clients(current_user: UserInDB = Depends(get_current_pro)):
     """Get all AI Minds (clients) for current Pro, including unconnected ones"""
     result = []
-    for mind in ai_minds_db.values():
-        if mind.therapist_id == current_user.id:
-            avatar = avatars_db.get(mind.avatar_id)
+    minds = db.get_ai_minds_by_therapist(current_user.id)
 
-            # Find invitation code if not connected
-            invitation_code = None
-            if mind.connected_at is None:
-                for inv in invitations_db.values():
-                    if inv.mind_id == mind.id and not inv.is_used:
-                        invitation_code = inv.code
-                        break
+    for mind_data in minds:
+        avatar_data = db.get_avatar_by_id(mind_data["avatar_id"])
 
-            result.append(AIMindResponse(
-                **mind.model_dump(),
-                avatar_name=avatar.name if avatar else None,
-                invitation_code=invitation_code
-            ))
+        # Find invitation code if not connected
+        invitation_code = None
+        if mind_data.get("connected_at") is None:
+            invitation_code = find_invitation_by_mind_id(mind_data["id"], current_user.id)
+
+        result.append(AIMindResponse(
+            **mind_data,
+            avatar_name=avatar_data["name"] if avatar_data else None,
+            invitation_code=invitation_code
+        ))
     return result
 
 @app.post("/api/clients", response_model=ClientProfileResponse, tags=["Clients"])
@@ -1343,20 +1364,20 @@ async def generate_pro_invitation(invite_data: ProInvitationGenerateRequest, cur
 
     # If mind_id is provided, use it to get avatar_id
     if mind_id:
-        mind = ai_minds_db.get(mind_id)
-        if not mind:
+        mind_data = db.get_ai_mind_by_id(mind_id)
+        if not mind_data:
             raise HTTPException(status_code=404, detail="AI Mind not found")
-        if mind.therapist_id != current_user.id:
+        if mind_data["therapist_id"] != current_user.id:
             raise HTTPException(status_code=403, detail="AI Mind does not belong to you")
-        avatar_id = mind.avatar_id
+        avatar_id = mind_data["avatar_id"]
     elif invite_data.avatar_id:
         # Legacy: use avatar_id directly
         avatar_id = invite_data.avatar_id
     else:
         raise HTTPException(status_code=400, detail="Either mind_id or avatar_id is required")
 
-    avatar = avatars_db.get(avatar_id)
-    if not avatar or avatar.therapist_id != current_user.id:
+    avatar_data = db.get_avatar_by_id(avatar_id)
+    if not avatar_data or avatar_data["therapist_id"] != current_user.id:
         raise HTTPException(status_code=400, detail="Invalid avatar ID")
 
     code = f"HAMO-{str(uuid.uuid4())[:6].upper()}"
@@ -1370,7 +1391,7 @@ async def generate_pro_invitation(invite_data: ProInvitationGenerateRequest, cur
         mind_id=mind_id,
         expires_at=expires_at
     )
-    invitations_db[code] = invitation
+    db.create_invitation(invitation.model_dump())
 
     return ProInvitationGenerateResponse(
         invitation_code=code,
@@ -1412,22 +1433,22 @@ async def create_invitation(invite_data: InvitationCreate, current_user: UserInD
 @app.get("/api/invitations/{code}", tags=["Invitations"])
 async def validate_invitation(code: str):
     """Validate an invitation code (public endpoint)"""
-    invitation = invitations_db.get(code)
-    if not invitation:
+    invitation_data = db.get_invitation_by_code(code)
+    if not invitation_data:
         raise HTTPException(status_code=404, detail="Invalid invitation code")
-    if invitation.is_used:
+    if invitation_data.get("is_used", False):
         raise HTTPException(status_code=400, detail="Invitation code already used")
-    if invitation.expires_at < datetime.now():
+    if datetime.fromisoformat(invitation_data["expires_at"]) < datetime.now():
         raise HTTPException(status_code=400, detail="Invitation code expired")
 
-    avatar = avatars_db.get(invitation.avatar_id)
-    therapist = users_db.get(invitation.therapist_id)
+    avatar_data = db.get_avatar_by_id(invitation_data["avatar_id"])
+    therapist_data = db.get_user_by_id(invitation_data["therapist_id"])
 
     return {
         "valid": True,
-        "avatar_name": avatar.name if avatar else None,
-        "therapist_name": therapist.full_name if therapist else None,
-        "expires_at": invitation.expires_at
+        "avatar_name": avatar_data["name"] if avatar_data else None,
+        "therapist_name": therapist_data["full_name"] if therapist_data else None,
+        "expires_at": invitation_data["expires_at"]
     }
 
 # ============================================================
@@ -1440,23 +1461,23 @@ class ClientInvitationValidateRequest(BaseModel):
 @app.post("/api/client/invitation/validate", tags=["Invitations"])
 async def validate_client_invitation(request: ClientInvitationValidateRequest):
     """Validate an invitation code (for hamo-client frontend)"""
-    invitation = invitations_db.get(request.invitation_code)
-    if not invitation:
+    invitation_data = db.get_invitation_by_code(request.invitation_code)
+    if not invitation_data:
         raise HTTPException(status_code=404, detail="Invalid invitation code")
-    if invitation.is_used:
+    if invitation_data.get("is_used", False):
         raise HTTPException(status_code=400, detail="Invitation code already used")
-    if invitation.expires_at < datetime.now():
+    if datetime.fromisoformat(invitation_data["expires_at"]) < datetime.now():
         raise HTTPException(status_code=400, detail="Invitation code expired")
 
-    avatar = avatars_db.get(invitation.avatar_id)
-    therapist = users_db.get(invitation.therapist_id)
+    avatar_data = db.get_avatar_by_id(invitation_data["avatar_id"])
+    therapist_data = db.get_user_by_id(invitation_data["therapist_id"])
 
     return {
         "valid": True,
         "pro_avatar": {
-            "id": avatar.id if avatar else None,
-            "name": avatar.name if avatar else None,
-            "therapist_name": therapist.full_name if therapist else None
+            "id": avatar_data["id"] if avatar_data else None,
+            "name": avatar_data["name"] if avatar_data else None,
+            "therapist_name": therapist_data["full_name"] if therapist_data else None
         }
     }
 
@@ -1479,55 +1500,54 @@ async def get_client_avatars(current_user: UserInDB = Depends(get_current_client
 async def connect_avatar(request: InvitationCodeRequest, current_user: UserInDB = Depends(get_current_client)):
     """Connect to a new avatar using an invitation code"""
     # Validate invitation code
-    invitation = invitations_db.get(request.invitation_code)
-    if not invitation:
+    invitation_data = db.get_invitation_by_code(request.invitation_code)
+    if not invitation_data:
         raise HTTPException(status_code=404, detail="Invalid invitation code")
-    if invitation.is_used:
+    if invitation_data.get("is_used", False):
         raise HTTPException(status_code=400, detail="Invitation code already used")
-    if invitation.expires_at < datetime.now():
+    if datetime.fromisoformat(invitation_data["expires_at"]) < datetime.now():
         raise HTTPException(status_code=400, detail="Invitation code expired")
 
     # Check if already connected to this avatar
-    for conn in client_avatar_connections_db.values():
-        if conn.client_id == current_user.id and conn.avatar_id == invitation.avatar_id and conn.is_active:
+    connections = db.get_connections_by_client(current_user.id)
+    for conn_data in connections:
+        if conn_data["avatar_id"] == invitation_data["avatar_id"] and conn_data.get("is_active", False):
             raise HTTPException(status_code=400, detail="Already connected to this avatar")
 
     # Create new connection (without removing existing connections - multi-avatar support)
-    create_client_avatar_connection(current_user.id, invitation.avatar_id)
+    connection = create_client_avatar_connection(current_user.id, invitation_data["avatar_id"])
 
     # Bind to AI Mind if mind_id exists in invitation
     now = datetime.now()
-    if invitation.mind_id:
-        mind = ai_minds_db.get(invitation.mind_id)
-        if mind:
-            mind.user_id = current_user.id
-            mind.connected_at = now
+    if invitation_data.get("mind_id"):
+        mind_data = db.get_ai_mind_by_id(invitation_data["mind_id"])
+        if mind_data:
+            mind_data["user_id"] = current_user.id
+            mind_data["connected_at"] = now.isoformat()
+            db.create_ai_mind(mind_data)  # Update by re-creating
 
     # Mark invitation as used
-    invitation.is_used = True
+    invitation_data["is_used"] = True
+    db.create_invitation(invitation_data)  # Update by re-creating
 
     # Get avatar details for response
-    avatar = avatars_db.get(invitation.avatar_id)
-    therapist = users_db.get(invitation.therapist_id)
+    avatar_data = db.get_avatar_by_id(invitation_data["avatar_id"])
+    therapist_data = db.get_user_by_id(invitation_data["therapist_id"])
 
-    if not avatar:
+    if not avatar_data:
         raise HTTPException(status_code=404, detail="Avatar not found")
 
-    # Find the connection we just created to get last_chat_time
-    connected_avatar = None
-    for conn in client_avatar_connections_db.values():
-        if conn.client_id == current_user.id and conn.avatar_id == invitation.avatar_id:
-            connected_avatar = ConnectedAvatarDetail(
-                id=avatar.id,
-                avatar_name=avatar.name,
-                pro_name=therapist.full_name if therapist else "Therapist",
-                specialty=avatar.specialty,
-                therapeutic_approaches=avatar.therapeutic_approaches,
-                about=avatar.about,
-                avatar_picture=None,
-                last_chat_time=conn.last_chat_time
-            )
-            break
+    # Build response with connection details
+    connected_avatar = ConnectedAvatarDetail(
+        id=avatar_data["id"],
+        avatar_name=avatar_data["name"],
+        pro_name=therapist_data["full_name"] if therapist_data else "Therapist",
+        specialty=avatar_data["specialty"],
+        therapeutic_approaches=avatar_data["therapeutic_approaches"],
+        about=avatar_data["about"],
+        avatar_picture=None,
+        last_chat_time=connection.last_chat_time
+    )
 
     return ConnectAvatarResponse(avatar=connected_avatar)
 
@@ -1540,15 +1560,18 @@ async def connect_avatar_by_id(request: AvatarIdRequest, current_user: UserInDB 
     This also creates an AI Mind for this Avatar + Client pair.
     """
     # Check if avatar exists
-    avatar = avatars_db.get(request.avatar_id)
-    if not avatar:
+    avatar_dict = db.get_avatar_by_id(request.avatar_id)
+    if not avatar_dict:
         raise HTTPException(status_code=404, detail="Avatar not found")
-    if not avatar.is_active:
+    if not avatar_dict.get("is_active", True):
         raise HTTPException(status_code=400, detail="Avatar is not active")
 
+    avatar = AvatarInDB(**avatar_dict)
+
     # Check if already connected to this avatar
-    for conn in client_avatar_connections_db.values():
-        if conn.client_id == current_user.id and conn.avatar_id == request.avatar_id and conn.is_active:
+    connections = db.get_connections_by_client(current_user.id)
+    for conn_data in connections:
+        if conn_data["avatar_id"] == request.avatar_id and conn_data.get("is_active", False):
             raise HTTPException(status_code=400, detail="Already connected to this avatar")
 
     # Create new connection (multi-avatar support)
@@ -1574,19 +1597,20 @@ async def connect_avatar_by_id(request: AvatarIdRequest, current_user: UserInDB 
         connected_at=now,  # Already connected
         created_at=now
     )
-    ai_minds_db[mind_id] = new_mind
+    db.create_ai_mind(new_mind.model_dump())
 
     # Update avatar client count
     avatar.client_count += 1
+    db.create_avatar(avatar.model_dump())
 
     # Get therapist info
-    therapist = users_db.get(avatar.therapist_id)
+    therapist_data = db.get_user_by_id(avatar.therapist_id)
 
     # Build response
     connected_avatar = ConnectedAvatarDetail(
         id=avatar.id,
         avatar_name=avatar.name,
-        pro_name=therapist.full_name if therapist else "Therapist",
+        pro_name=therapist_data["full_name"] if therapist_data else "Therapist",
         specialty=avatar.specialty,
         therapeutic_approaches=avatar.therapeutic_approaches,
         about=avatar.about,
@@ -1638,33 +1662,29 @@ class AIMindByUserAvatarResponse(BaseModel):
 async def get_user_ai_mind(user_id: str, avatar_id: str, current_user: UserInDB = Depends(get_current_user)):
     """Get AI Mind by user_id and avatar_id pair"""
     # Find AI Mind by user_id and avatar_id
-    found_mind = None
-    for mind in ai_minds_db.values():
-        if mind.user_id == user_id and mind.avatar_id == avatar_id:
-            found_mind = mind
-            break
+    mind_data = db.get_ai_mind_by_user_avatar(user_id, avatar_id)
 
-    if not found_mind:
+    if not mind_data:
         raise HTTPException(status_code=404, detail="AI Mind not found for this user and avatar pair")
 
     # Get avatar name
-    avatar = avatars_db.get(avatar_id)
+    avatar_data = db.get_avatar_by_id(avatar_id)
 
     return AIMindByUserAvatarResponse(
-        id=found_mind.id,
-        name=found_mind.name,
-        sex=found_mind.sex,
-        age=found_mind.age,
-        avatar_id=found_mind.avatar_id,
-        avatar_name=avatar.name if avatar else None,
-        personality=found_mind.personality,
-        emotion_pattern=found_mind.emotion_pattern,
-        cognition_beliefs=found_mind.cognition_beliefs,
-        relationship_manipulations=found_mind.relationship_manipulations,
-        goals=found_mind.goals,
-        therapy_principles=found_mind.therapy_principles,
-        sessions=found_mind.sessions,
-        avg_time=found_mind.avg_time
+        id=mind_data["id"],
+        name=mind_data["name"],
+        sex=mind_data.get("sex"),
+        age=mind_data.get("age"),
+        avatar_id=mind_data["avatar_id"],
+        avatar_name=avatar_data["name"] if avatar_data else None,
+        personality=mind_data.get("personality"),
+        emotion_pattern=mind_data.get("emotion_pattern"),
+        cognition_beliefs=mind_data.get("cognition_beliefs"),
+        relationship_manipulations=mind_data.get("relationship_manipulations"),
+        goals=mind_data.get("goals"),
+        therapy_principles=mind_data.get("therapy_principles"),
+        sessions=mind_data.get("sessions", 0),
+        avg_time=mind_data.get("avg_time", 0)
     )
 
 @app.post("/api/mind/{mind_id}/supervise", response_model=SupervisionFeedbackResponse, tags=["AI Mind"])
@@ -1675,18 +1695,18 @@ async def submit_supervision_feedback(
 ):
     """Submit supervision feedback for a client's AI Mind profile (Pro only)"""
     # Find the AI Mind by mind_id
-    mind = ai_minds_db.get(mind_id)
-    if not mind:
+    mind_data = db.get_ai_mind_by_id(mind_id)
+    if not mind_data:
         raise HTTPException(status_code=404, detail="AI Mind not found")
 
     # Verify the avatar belongs to current pro
-    avatar = avatars_db.get(mind.avatar_id)
-    if not avatar:
+    avatar_data = db.get_avatar_by_id(mind_data["avatar_id"])
+    if not avatar_data:
         raise HTTPException(status_code=404, detail="Avatar not found")
-    if avatar.therapist_id != current_user.id:
+    if avatar_data["therapist_id"] != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized to supervise this avatar")
 
-    # Store the feedback using mind_id as key
+    # Store the feedback using mind_id as key (still in-memory for now)
     cache_key = mind_id
     if cache_key not in supervision_feedback_db:
         supervision_feedback_db[cache_key] = []
@@ -1763,11 +1783,21 @@ class ProUserDetail(BaseModel):
 @app.get("/api/portal/stats", response_model=PortalStatsResponse, tags=["Portal"])
 async def get_portal_stats():
     """Get overall platform statistics"""
-    total_pros = sum(1 for u in users_db.values() if u.role == UserRole.THERAPIST)
-    total_clients = sum(1 for u in users_db.values() if u.role == UserRole.CLIENT)
-    total_avatars = len(avatars_db)
-    total_sessions = sum(c.sessions for c in client_profiles_db.values())
-    active_invitations = sum(1 for inv in invitations_db.values() if not inv.is_used and inv.expires_at > datetime.now())
+    all_users = db.get_all_users()
+    total_pros = sum(1 for u in all_users if u.get("role") == UserRole.THERAPIST)
+    total_clients = sum(1 for u in all_users if u.get("role") == UserRole.CLIENT)
+
+    all_avatars = db.get_all_avatars()
+    total_avatars = len(all_avatars)
+
+    # For sessions, we'd need to scan all AI minds or sessions (expensive)
+    # For now, return 0 or implement later
+    total_sessions = 0
+
+    all_invitations = db.get_all_invitations()
+    active_invitations = sum(1 for inv in all_invitations
+                           if not inv.get("is_used", False)
+                           and datetime.fromisoformat(inv["expires_at"]) > datetime.now())
 
     return PortalStatsResponse(
         total_pros=total_pros,
@@ -1781,64 +1811,70 @@ async def get_portal_stats():
 async def get_portal_pro_users():
     """Get all Pro users with their statistics"""
     result = []
-    for user in users_db.values():
-        if user.role == UserRole.THERAPIST:
-            avatar_count = sum(1 for a in avatars_db.values() if a.therapist_id == user.id)
-            client_count = sum(1 for c in client_profiles_db.values() if c.therapist_id == user.id)
-            total_sessions = sum(c.sessions for c in client_profiles_db.values() if c.therapist_id == user.id)
+    all_users = db.get_all_users()
+
+    for user_data in all_users:
+        if user_data.get("role") == UserRole.THERAPIST:
+            avatars = db.get_avatars_by_pro(user_data["id"])
+            avatar_count = len(avatars)
+
+            minds = db.get_ai_minds_by_therapist(user_data["id"])
+            client_count = len(minds)
+
+            # For sessions, would need to scan - set to 0 for now
+            total_sessions = 0
 
             result.append(ProUserStats(
-                id=user.id,
-                email=user.email,
-                full_name=user.full_name,
-                profession=user.profession,
-                created_at=user.created_at,
+                id=user_data["id"],
+                email=user_data["email"],
+                full_name=user_data["full_name"],
+                profession=user_data.get("profession"),
+                created_at=datetime.fromisoformat(user_data["created_at"]),
                 avatar_count=avatar_count,
                 client_count=client_count,
                 total_sessions=total_sessions,
-                is_active=user.is_active
+                is_active=user_data.get("is_active", True)
             ))
     return result
 
 @app.get("/api/portal/pro-users/{pro_id}/details", response_model=ProUserDetail, tags=["Portal"])
 async def get_portal_pro_user_details(pro_id: str):
     """Get Pro user details with avatars and clients (AI Minds)"""
-    user = users_db.get(pro_id)
-    if not user or user.role != UserRole.THERAPIST:
+    user_data = db.get_user_by_id(pro_id)
+    if not user_data or user_data.get("role") != UserRole.THERAPIST:
         raise HTTPException(status_code=404, detail="Pro user not found")
 
     # Get all avatars for this pro
-    user_avatars = [AvatarResponse(**a.model_dump()) for a in avatars_db.values() if a.therapist_id == pro_id]
+    avatars = db.get_avatars_by_pro(pro_id)
+    user_avatars = [AvatarResponse(**a) for a in avatars]
 
     # Get all AI Minds (clients) for this pro - same logic as /api/clients
     user_clients = []
-    for mind in ai_minds_db.values():
-        if mind.therapist_id == pro_id:
-            avatar = avatars_db.get(mind.avatar_id)
+    minds = db.get_ai_minds_by_therapist(pro_id)
 
-            # Find invitation code if not connected
-            invitation_code = None
-            if mind.connected_at is None:
-                for inv in invitations_db.values():
-                    if inv.mind_id == mind.id and not inv.is_used:
-                        invitation_code = inv.code
-                        break
+    for mind_data in minds:
+        avatar_data = db.get_avatar_by_id(mind_data["avatar_id"])
 
-            user_clients.append(AIMindResponse(
-                **mind.model_dump(),
-                avatar_name=avatar.name if avatar else None,
-                invitation_code=invitation_code
-            ))
+        # Find invitation code if not connected
+        invitation_code = None
+        if mind_data.get("connected_at") is None:
+            invitation_code = find_invitation_by_mind_id(mind_data["id"], pro_id)
+
+        user_clients.append(AIMindResponse(
+            **mind_data,
+            avatar_name=avatar_data["name"] if avatar_data else None,
+            invitation_code=invitation_code
+        ))
 
     return ProUserDetail(
-        id=user.id,
-        email=user.email,
-        full_name=user.full_name,
-        profession=user.profession,
-        license_number=user.license_number,
-        specializations=user.specializations,
-        created_at=user.created_at,
-        is_active=user.is_active,
+        id=user_data["id"],
+        email=user_data["email"],
+        full_name=user_data["full_name"],
+        profession=user_data.get("profession"),
+        license_number=user_data.get("license_number"),
+        specializations=user_data.get("specializations", []),
+        created_at=datetime.fromisoformat(user_data["created_at"]),
+        is_active=user_data.get("is_active", True),
         avatars=user_avatars,
         clients=user_clients
     )
@@ -1867,28 +1903,28 @@ async def initialize_psvs_profile(mind_id: str, current_user: UserInDB = Depends
     This is automatically called when creating an AI Mind, but can be called manually if needed.
     """
     # Get AI Mind
-    mind = ai_minds_db.get(mind_id)
-    if not mind:
+    mind_data = db.get_ai_mind_by_id(mind_id)
+    if not mind_data:
         raise HTTPException(status_code=404, detail="AI Mind not found")
 
     # Check if PSVS profile already exists
-    if mind_id in psvs_profiles_db:
-        existing_profile = psvs_profiles_db[mind_id]
+    existing_profile_data = db.get_psvs_profile(mind_id)
+    if existing_profile_data:
         return PSVSProfileResponse(
-            id=existing_profile.id,
-            mind_id=existing_profile.mind_id,
-            current_position=existing_profile.current_position,
-            recent_trajectory=existing_profile.trajectory_history[-10:],
-            created_at=existing_profile.created_at,
-            updated_at=existing_profile.updated_at
+            id=existing_profile_data["id"],
+            mind_id=existing_profile_data["mind_id"],
+            current_position=PSVSCoordinates(**existing_profile_data["current_position"]),
+            recent_trajectory=[PSVSCoordinates(**c) for c in existing_profile_data["trajectory_history"][-10:]],
+            created_at=datetime.fromisoformat(existing_profile_data["created_at"]),
+            updated_at=datetime.fromisoformat(existing_profile_data["updated_at"])
         )
 
     # Calculate initial PSVS position from AI Mind data
     ai_mind_dict = {
-        "personality": mind.personality.model_dump() if mind.personality else {},
-        "emotion_pattern": mind.emotion_pattern.model_dump() if mind.emotion_pattern else {},
-        "cognition_beliefs": mind.cognition_beliefs.model_dump() if mind.cognition_beliefs else {},
-        "relationship_manipulations": mind.relationship_manipulations.model_dump() if mind.relationship_manipulations else {},
+        "personality": mind_data.get("personality", {}),
+        "emotion_pattern": mind_data.get("emotion_pattern", {}),
+        "cognition_beliefs": mind_data.get("cognition_beliefs", {}),
+        "relationship_manipulations": mind_data.get("relationship_manipulations", {}),
     }
 
     initial_coords = calculate_initial_psvs_position(ai_mind_dict)
@@ -1904,7 +1940,7 @@ async def initialize_psvs_profile(mind_id: str, current_user: UserInDB = Depends
         updated_at=datetime.now()
     )
 
-    psvs_profiles_db[mind_id] = psvs_profile
+    db.create_psvs_profile(psvs_profile.model_dump())
 
     return PSVSProfileResponse(
         id=psvs_profile.id,
@@ -1919,28 +1955,28 @@ async def initialize_psvs_profile(mind_id: str, current_user: UserInDB = Depends
 @app.get("/api/mind/{mind_id}/psvs", response_model=PSVSProfileResponse, tags=["PSVS"])
 async def get_psvs_profile(mind_id: str, current_user: UserInDB = Depends(get_current_user)):
     """Get current PSVS profile for an AI Mind."""
-    psvs_profile = psvs_profiles_db.get(mind_id)
-    if not psvs_profile:
+    psvs_profile_data = db.get_psvs_profile(mind_id)
+    if not psvs_profile_data:
         raise HTTPException(status_code=404, detail="PSVS profile not found. Initialize it first.")
 
     return PSVSProfileResponse(
-        id=psvs_profile.id,
-        mind_id=psvs_profile.mind_id,
-        current_position=psvs_profile.current_position,
-        recent_trajectory=psvs_profile.trajectory_history[-10:],
-        created_at=psvs_profile.created_at,
-        updated_at=psvs_profile.updated_at
+        id=psvs_profile_data["id"],
+        mind_id=psvs_profile_data["mind_id"],
+        current_position=PSVSCoordinates(**psvs_profile_data["current_position"]),
+        recent_trajectory=[PSVSCoordinates(**c) for c in psvs_profile_data["trajectory_history"][-10:]],
+        created_at=datetime.fromisoformat(psvs_profile_data["created_at"]),
+        updated_at=datetime.fromisoformat(psvs_profile_data["updated_at"])
     )
 
 
 @app.get("/api/mind/{mind_id}/psvs/trajectory", response_model=list[PSVSCoordinates], tags=["PSVS"])
 async def get_psvs_trajectory(mind_id: str, current_user: UserInDB = Depends(get_current_user)):
     """Get full PSVS trajectory history for an AI Mind."""
-    psvs_profile = psvs_profiles_db.get(mind_id)
-    if not psvs_profile:
+    psvs_profile_data = db.get_psvs_profile(mind_id)
+    if not psvs_profile_data:
         raise HTTPException(status_code=404, detail="PSVS profile not found")
 
-    return psvs_profile.trajectory_history
+    return [PSVSCoordinates(**c) for c in psvs_profile_data["trajectory_history"]]
 
 
 @app.post("/api/session/start", response_model=SessionStartResponse, tags=["PSVS"])
@@ -1951,24 +1987,24 @@ async def start_conversation_session(
 ):
     """Start a new conversation session."""
     # Verify AI Mind exists
-    mind = ai_minds_db.get(mind_id)
-    if not mind:
+    mind_data = db.get_ai_mind_by_id(mind_id)
+    if not mind_data:
         raise HTTPException(status_code=404, detail="AI Mind not found")
 
     # Verify avatar exists
-    avatar = avatars_db.get(avatar_id)
-    if not avatar:
+    avatar_data = db.get_avatar_by_id(avatar_id)
+    if not avatar_data:
         raise HTTPException(status_code=404, detail="Avatar not found")
 
     # Get or create PSVS profile
-    psvs_profile = psvs_profiles_db.get(mind_id)
-    if not psvs_profile:
+    psvs_profile_data = db.get_psvs_profile(mind_id)
+    if not psvs_profile_data:
         # Auto-initialize PSVS profile
         ai_mind_dict = {
-            "personality": mind.personality.model_dump() if mind.personality else {},
-            "emotion_pattern": mind.emotion_pattern.model_dump() if mind.emotion_pattern else {},
-            "cognition_beliefs": mind.cognition_beliefs.model_dump() if mind.cognition_beliefs else {},
-            "relationship_manipulations": mind.relationship_manipulations.model_dump() if mind.relationship_manipulations else {},
+            "personality": mind_data.get("personality", {}),
+            "emotion_pattern": mind_data.get("emotion_pattern", {}),
+            "cognition_beliefs": mind_data.get("cognition_beliefs", {}),
+            "relationship_manipulations": mind_data.get("relationship_manipulations", {}),
         }
         initial_coords = calculate_initial_psvs_position(ai_mind_dict)
         psvs_id = str(uuid.uuid4())
@@ -1980,7 +2016,10 @@ async def start_conversation_session(
             created_at=datetime.now(),
             updated_at=datetime.now()
         )
-        psvs_profiles_db[mind_id] = psvs_profile
+        db.create_psvs_profile(psvs_profile.model_dump())
+        current_position = psvs_profile.current_position
+    else:
+        current_position = PSVSCoordinates(**psvs_profile_data["current_position"])
 
     # Create session
     session_id = str(uuid.uuid4())
@@ -1994,13 +2033,13 @@ async def start_conversation_session(
         is_active=True
     )
 
-    conversation_sessions_db[session_id] = session
+    db.create_session(session.model_dump())
 
     return SessionStartResponse(
         session_id=session_id,
         mind_id=mind_id,
         avatar_id=avatar_id,
-        initial_psvs_position=psvs_profile.current_position
+        initial_psvs_position=current_position
     )
 
 
@@ -2023,24 +2062,27 @@ async def send_message(
     7. Return response + PSVS position
     """
     # Get session
-    session = conversation_sessions_db.get(session_id)
-    if not session:
+    session_data = db.get_session_by_id(session_id)
+    if not session_data:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    if not session.is_active:
+    if not session_data.get("is_active", False):
         raise HTTPException(status_code=400, detail="Session has ended")
 
     # Get AI Mind and Avatar
-    mind = ai_minds_db.get(session.mind_id)
-    avatar = avatars_db.get(session.avatar_id)
+    mind_data = db.get_ai_mind_by_id(session_data["mind_id"])
+    avatar_data = db.get_avatar_by_id(session_data["avatar_id"])
 
-    if not mind or not avatar:
+    if not mind_data or not avatar_data:
         raise HTTPException(status_code=404, detail="Mind or Avatar not found")
 
     # Get PSVS profile
-    psvs_profile = psvs_profiles_db.get(session.mind_id)
-    if not psvs_profile:
+    psvs_profile_data = db.get_psvs_profile(session_data["mind_id"])
+    if not psvs_profile_data:
         raise HTTPException(status_code=404, detail="PSVS profile not found")
+
+    # Reconstruct PSVS profile object for manipulation
+    psvs_profile = PSVSProfile(**psvs_profile_data)
 
     # Check if we should skip PSVS update for very short messages
     skip_update = should_skip_psvs_update(message)
@@ -2068,18 +2110,21 @@ async def send_message(
 
         psvs_profile.updated_at = datetime.now()
 
+        # Save updated PSVS profile
+        db.update_psvs_profile(session_data["mind_id"], psvs_profile.model_dump())
+
     # Generate system prompt with current PSVS position
     avatar_dict = {
-        "name": avatar.name,
-        "specialty": avatar.specialty,
-        "therapeutic_approaches": avatar.therapeutic_approaches,
-        "about": avatar.about,
+        "name": avatar_data["name"],
+        "specialty": avatar_data["specialty"],
+        "therapeutic_approaches": avatar_data["therapeutic_approaches"],
+        "about": avatar_data["about"],
     }
 
     ai_mind_dict = {
-        "name": mind.name,
-        "goals": mind.goals,
-        "therapy_principles": mind.therapy_principles,
+        "name": mind_data["name"],
+        "goals": mind_data.get("goals"),
+        "therapy_principles": mind_data.get("therapy_principles"),
     }
 
     psvs_position_dict = psvs_profile.current_position.model_dump()
@@ -2087,18 +2132,8 @@ async def send_message(
     system_prompt = generate_system_prompt(avatar_dict, ai_mind_dict, psvs_position_dict)
 
     # Get conversation history
-    conversation_history = []
-    for msg_id, msg in conversation_messages_db.items():
-        if msg.session_id == session_id:
-            conversation_history.append({
-                "role": msg.role,
-                "content": msg.content
-            })
-
-    # Sort by timestamp
-    conversation_history.sort(key=lambda x: conversation_messages_db[
-        next(k for k, v in conversation_messages_db.items() if v.content == x["content"])
-    ].timestamp)
+    messages = db.get_messages_by_session(session_id)
+    conversation_history = [{"role": msg["role"], "content": msg["content"]} for msg in messages]
 
     # Generate response using Gemini
     response_text = generate_response(system_prompt, message, conversation_history)
@@ -2108,29 +2143,30 @@ async def send_message(
     user_message = ConversationMessage(
         id=user_msg_id,
         session_id=session_id,
-        mind_id=session.mind_id,
+        mind_id=session_data["mind_id"],
         role="user",
         content=message,
         psvs_snapshot=psvs_profile.current_position,
         timestamp=datetime.now()
     )
-    conversation_messages_db[user_msg_id] = user_message
+    db.create_message(user_message.model_dump())
 
     # Store assistant response
     assistant_msg_id = str(uuid.uuid4())
     assistant_message = ConversationMessage(
         id=assistant_msg_id,
         session_id=session_id,
-        mind_id=session.mind_id,
+        mind_id=session_data["mind_id"],
         role="assistant",
         content=response_text,
         psvs_snapshot=psvs_profile.current_position,
         timestamp=datetime.now()
     )
-    conversation_messages_db[assistant_msg_id] = assistant_message
+    db.create_message(assistant_message.model_dump())
 
     # Update session
-    session.message_count += 2
+    session_data["message_count"] = session_data.get("message_count", 0) + 2
+    db.update_session(session_id, session_data)
 
     return MessageResponse(
         message_id=assistant_msg_id,
@@ -2143,15 +2179,15 @@ async def send_message(
 @app.get("/api/session/{session_id}/messages", response_model=list[ConversationMessage], tags=["PSVS"])
 async def get_session_messages(session_id: str, current_user: UserInDB = Depends(get_current_user)):
     """Get all messages in a conversation session."""
-    session = conversation_sessions_db.get(session_id)
-    if not session:
+    session_data = db.get_session_by_id(session_id)
+    if not session_data:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Get all messages for this session
-    messages = [msg for msg in conversation_messages_db.values() if msg.session_id == session_id]
+    # Get all messages for this session (already sorted by timestamp in db method)
+    messages_data = db.get_messages_by_session(session_id)
 
-    # Sort by timestamp
-    messages.sort(key=lambda x: x.timestamp)
+    # Convert to Pydantic models
+    messages = [ConversationMessage(**msg_data) for msg_data in messages_data]
 
     return messages
 
@@ -2159,12 +2195,14 @@ async def get_session_messages(session_id: str, current_user: UserInDB = Depends
 @app.post("/api/session/{session_id}/end", tags=["PSVS"])
 async def end_conversation_session(session_id: str, current_user: UserInDB = Depends(get_current_user)):
     """End a conversation session."""
-    session = conversation_sessions_db.get(session_id)
-    if not session:
+    session_data = db.get_session_by_id(session_id)
+    if not session_data:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    session.is_active = False
-    session.ended_at = datetime.now()
+    session_data["is_active"] = False
+    session_data["ended_at"] = datetime.now().isoformat()
+
+    db.update_session(session_id, session_data)
 
     return {"success": True, "message": "Session ended", "session_id": session_id}
 

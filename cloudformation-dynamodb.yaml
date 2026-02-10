@@ -1,0 +1,338 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'DynamoDB tables for Hamo-UME application'
+
+Resources:
+  # ============================================================
+  # USERS TABLE
+  # ============================================================
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: hamo_users
+      BillingMode: PAY_PER_REQUEST  # On-demand pricing, no capacity planning needed
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: email
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: email-index
+          KeySchema:
+            - AttributeName: email
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Application
+          Value: Hamo-UME
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ============================================================
+  # AVATARS TABLE
+  # ============================================================
+  AvatarsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: hamo_avatars
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: pro_user_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: pro_user_id-index
+          KeySchema:
+            - AttributeName: pro_user_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Application
+          Value: Hamo-UME
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ============================================================
+  # AI MINDS TABLE
+  # ============================================================
+  AIMindsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: hamo_ai_minds
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: avatar_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: user_id-index
+          KeySchema:
+            - AttributeName: user_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: avatar_id-index
+          KeySchema:
+            - AttributeName: avatar_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Application
+          Value: Hamo-UME
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ============================================================
+  # PSVS PROFILES TABLE
+  # ============================================================
+  PSVSProfilesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: hamo_psvs_profiles
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: mind_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: mind_id
+          KeyType: HASH
+      Tags:
+        - Key: Application
+          Value: Hamo-UME
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ============================================================
+  # CONVERSATION SESSIONS TABLE
+  # ============================================================
+  SessionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: hamo_conversation_sessions
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: mind_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: user_id-index
+          KeySchema:
+            - AttributeName: user_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: mind_id-index
+          KeySchema:
+            - AttributeName: mind_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Application
+          Value: Hamo-UME
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ============================================================
+  # CONVERSATION MESSAGES TABLE
+  # ============================================================
+  MessagesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: hamo_conversation_messages
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: session_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: session_id-index
+          KeySchema:
+            - AttributeName: session_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Application
+          Value: Hamo-UME
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ============================================================
+  # CLIENT-AVATAR CONNECTIONS TABLE
+  # ============================================================
+  ConnectionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: hamo_client_avatar_connections
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: client_user_id
+          AttributeType: S
+        - AttributeName: avatar_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: client_user_id-index
+          KeySchema:
+            - AttributeName: client_user_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: avatar_id-index
+          KeySchema:
+            - AttributeName: avatar_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Application
+          Value: Hamo-UME
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ============================================================
+  # INVITATIONS TABLE
+  # ============================================================
+  InvitationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: hamo_invitations
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: code
+          AttributeType: S
+        - AttributeName: pro_user_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: code
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: pro_user_id-index
+          KeySchema:
+            - AttributeName: pro_user_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Application
+          Value: Hamo-UME
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ============================================================
+  # REFRESH TOKENS TABLE
+  # ============================================================
+  RefreshTokensTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: hamo_refresh_tokens
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: token
+          AttributeType: S
+      KeySchema:
+        - AttributeName: token
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Application
+          Value: Hamo-UME
+        - Key: Environment
+          Value: !Ref Environment
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues:
+      - development
+      - staging
+      - production
+    Description: Environment name for tagging resources
+
+Outputs:
+  UsersTableName:
+    Description: Name of the Users table
+    Value: !Ref UsersTable
+    Export:
+      Name: !Sub "${AWS::StackName}-UsersTable"
+
+  AvatarsTableName:
+    Description: Name of the Avatars table
+    Value: !Ref AvatarsTable
+    Export:
+      Name: !Sub "${AWS::StackName}-AvatarsTable"
+
+  AIMindsTableName:
+    Description: Name of the AI Minds table
+    Value: !Ref AIMindsTable
+    Export:
+      Name: !Sub "${AWS::StackName}-AIMindsTable"
+
+  PSVSProfilesTableName:
+    Description: Name of the PSVS Profiles table
+    Value: !Ref PSVSProfilesTable
+    Export:
+      Name: !Sub "${AWS::StackName}-PSVSProfilesTable"
+
+  SessionsTableName:
+    Description: Name of the Sessions table
+    Value: !Ref SessionsTable
+    Export:
+      Name: !Sub "${AWS::StackName}-SessionsTable"
+
+  MessagesTableName:
+    Description: Name of the Messages table
+    Value: !Ref MessagesTable
+    Export:
+      Name: !Sub "${AWS::StackName}-MessagesTable"
+
+  ConnectionsTableName:
+    Description: Name of the Connections table
+    Value: !Ref ConnectionsTable
+    Export:
+      Name: !Sub "${AWS::StackName}-ConnectionsTable"
+
+  InvitationsTableName:
+    Description: Name of the Invitations table
+    Value: !Ref InvitationsTable
+    Export:
+      Name: !Sub "${AWS::StackName}-InvitationsTable"
+
+  RefreshTokensTableName:
+    Description: Name of the Refresh Tokens table
+    Value: !Ref RefreshTokensTable
+    Export:
+      Name: !Sub "${AWS::StackName}-RefreshTokensTable"
