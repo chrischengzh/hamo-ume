@@ -4,7 +4,7 @@ PSVS Configuration Constants
 
 # Gemini API Configuration
 GEMINI_API_KEY = "AIzaSyAg7u3Pf2YmIw_qTc0YIFViLT3La3WT6qU"
-GEMINI_MODEL = "gemini-2.0-flash-exp"  # Using flash model for speed and efficiency
+GEMINI_MODEL = "gemini-3-flash-preview"  # Using gemini-3-flash-preview as requested
 
 # Generation parameters
 GENERATION_CONFIG = {
