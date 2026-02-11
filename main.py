@@ -3,7 +3,7 @@ Hamo-UME: Hamo Unified Mind Engine
 Backend API Server with JWT Authentication
 
 Tech Stack: Python + FastAPI + JWT
-Version: 1.4.6
+Version: 1.4.8
 """
 
 from fastapi import FastAPI, HTTPException, Depends, status
@@ -503,6 +503,7 @@ class ConversationSession(BaseModel):
     ended_at: Optional[datetime] = None
     message_count: int = 0
     is_active: bool = True
+    pro_visible: bool = True  # 咨询师是否可见该对话，默认可见
 
 class ConversationMessage(BaseModel):
     """A single message in a conversation with PSVS snapshot"""
@@ -730,8 +731,8 @@ class MockDataGenerator:
 
 app = FastAPI(
     title="Hamo-UME API",
-    description="Hamo Unified Mind Engine - Backend API v1.4.6",
-    version="1.4.6"
+    description="Hamo Unified Mind Engine - Backend API v1.4.8",
+    version="1.4.8"
 )
 
 app.add_middleware(
@@ -761,7 +762,7 @@ app.add_middleware(
 
 @app.get("/", tags=["Health"])
 async def root():
-    return {"service": "Hamo-UME", "version": "1.4.6", "status": "running"}
+    return {"service": "Hamo-UME", "version": "1.4.8", "status": "running"}
 
 # ============================================================
 # PRO (THERAPIST) AUTH ENDPOINTS
@@ -2230,10 +2231,36 @@ async def get_sessions_by_mind(mind_id: str, current_user: UserInDB = Depends(ge
 
     sessions_data = db.get_sessions_by_mind(mind_id)
 
+    # If therapist is viewing, filter out sessions marked as not visible to Pro
+    if current_user.role == UserRole.THERAPIST:
+        sessions_data = [s for s in sessions_data if s.get("pro_visible", True)]
+
     # Sort by started_at descending (newest first)
     sessions_data.sort(key=lambda x: x.get("started_at", ""), reverse=True)
 
     return [ConversationSession(**s) for s in sessions_data]
+
+
+class VisibilityUpdate(BaseModel):
+    """Request body for updating session visibility"""
+    pro_visible: bool  # true = 咨询师可见, false = 咨询师不可见
+
+
+@app.put("/api/session/{session_id}/visibility", tags=["PSVS"])
+async def update_session_visibility(
+    session_id: str,
+    visibility: VisibilityUpdate,
+    current_user: UserInDB = Depends(get_current_user)
+):
+    """Update whether a session is visible to the therapist (Pro)."""
+    session_data = db.get_session_by_id(session_id)
+    if not session_data:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    session_data["pro_visible"] = visibility.pro_visible
+    db.update_session(session_id, session_data)
+
+    return {"success": True, "message": "Visibility updated"}
 
 
 @app.post("/api/session/{session_id}/end", tags=["PSVS"])
