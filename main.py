@@ -2220,6 +2220,22 @@ async def get_session_messages(session_id: str, current_user: UserInDB = Depends
     return messages
 
 
+@app.get("/api/session/mind/{mind_id}", response_model=list[ConversationSession], tags=["PSVS"])
+async def get_sessions_by_mind(mind_id: str, current_user: UserInDB = Depends(get_current_user)):
+    """Get all conversation sessions for an AI Mind."""
+    # Verify AI Mind exists
+    mind_data = db.get_ai_mind_by_id(mind_id)
+    if not mind_data:
+        raise HTTPException(status_code=404, detail="AI Mind not found")
+
+    sessions_data = db.get_sessions_by_mind(mind_id)
+
+    # Sort by started_at descending (newest first)
+    sessions_data.sort(key=lambda x: x.get("started_at", ""), reverse=True)
+
+    return [ConversationSession(**s) for s in sessions_data]
+
+
 @app.post("/api/session/{session_id}/end", tags=["PSVS"])
 async def end_conversation_session(session_id: str, current_user: UserInDB = Depends(get_current_user)):
     """End a conversation session."""
