@@ -1671,35 +1671,6 @@ class AIMindByUserAvatarResponse(BaseModel):
     sessions: int = 0
     avg_time: int = 0
 
-@app.get("/api/mind/{user_id}/{avatar_id}", response_model=AIMindByUserAvatarResponse, tags=["AI Mind"])
-async def get_user_ai_mind(user_id: str, avatar_id: str, current_user: UserInDB = Depends(get_current_user)):
-    """Get AI Mind by user_id and avatar_id pair"""
-    # Find AI Mind by user_id and avatar_id
-    mind_data = db.get_ai_mind_by_user_avatar(user_id, avatar_id)
-
-    if not mind_data:
-        raise HTTPException(status_code=404, detail="AI Mind not found for this user and avatar pair")
-
-    # Get avatar name
-    avatar_data = db.get_avatar_by_id(avatar_id)
-
-    return AIMindByUserAvatarResponse(
-        id=mind_data["id"],
-        name=mind_data["name"],
-        sex=mind_data.get("sex"),
-        age=mind_data.get("age"),
-        avatar_id=mind_data["avatar_id"],
-        avatar_name=avatar_data["name"] if avatar_data else None,
-        personality=mind_data.get("personality"),
-        emotion_pattern=mind_data.get("emotion_pattern"),
-        cognition_beliefs=mind_data.get("cognition_beliefs"),
-        relationship_manipulations=mind_data.get("relationship_manipulations"),
-        goals=mind_data.get("goals"),
-        therapy_principles=mind_data.get("therapy_principles"),
-        sessions=mind_data.get("sessions", 0),
-        avg_time=mind_data.get("avg_time", 0)
-    )
-
 @app.post("/api/mind/{mind_id}/supervise", response_model=SupervisionFeedbackResponse, tags=["AI Mind"])
 async def submit_supervision_feedback(
     mind_id: str,
@@ -1991,6 +1962,41 @@ async def get_psvs_trajectory(mind_id: str, current_user: UserInDB = Depends(get
 
     return [PSVSCoordinates(**c) for c in psvs_profile_data["trajectory_history"]]
 
+
+# NOTE: This route MUST come AFTER all /api/mind/{mind_id}/xxx routes
+# because FastAPI matches {user_id}/{avatar_id} greedily and would
+# intercept /psvs, /supervise etc. as avatar_id values.
+@app.get("/api/mind/{user_id}/{avatar_id}", response_model=AIMindByUserAvatarResponse, tags=["AI Mind"])
+async def get_user_ai_mind(user_id: str, avatar_id: str, current_user: UserInDB = Depends(get_current_user)):
+    """Get AI Mind by user_id and avatar_id pair"""
+    mind_data = db.get_ai_mind_by_user_avatar(user_id, avatar_id)
+
+    if not mind_data:
+        raise HTTPException(status_code=404, detail="AI Mind not found for this user and avatar pair")
+
+    avatar_data = db.get_avatar_by_id(avatar_id)
+
+    return AIMindByUserAvatarResponse(
+        id=mind_data["id"],
+        name=mind_data["name"],
+        sex=mind_data.get("sex"),
+        age=mind_data.get("age"),
+        avatar_id=mind_data["avatar_id"],
+        avatar_name=avatar_data["name"] if avatar_data else None,
+        personality=mind_data.get("personality"),
+        emotion_pattern=mind_data.get("emotion_pattern"),
+        cognition_beliefs=mind_data.get("cognition_beliefs"),
+        relationship_manipulations=mind_data.get("relationship_manipulations"),
+        goals=mind_data.get("goals"),
+        therapy_principles=mind_data.get("therapy_principles"),
+        sessions=mind_data.get("sessions", 0),
+        avg_time=mind_data.get("avg_time", 0)
+    )
+
+
+# ============================================================
+# CONVERSATION SESSION ENDPOINTS
+# ============================================================
 
 @app.post("/api/session/start", response_model=SessionStartResponse, tags=["PSVS"])
 async def start_conversation_session(
